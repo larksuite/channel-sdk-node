@@ -1,0 +1,18 @@
+{
+  "version": "0.2.0",
+  "comment": "Run the open .ts via node --import tsx (sourcemaps on; breakpoints work in src/ and examples/). Credentials live in examples/.env.",
+  "configurations": [
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Debug current file (tsx)",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["--import", "tsx"],
+      "program": "${file}",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/examples/.env",
+      "skipFiles": ["<node_internals>/**"]
+    }
+  ]
+}
