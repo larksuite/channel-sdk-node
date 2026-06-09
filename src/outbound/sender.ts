@@ -53,6 +53,10 @@ export class OutboundSender {
     if ('audio' in input) return this.sendAudio(to, idType, input.audio, opts);
     if ('video' in input) return this.sendVideo(to, idType, input.video, opts);
     if ('card' in input) return this.sendCard(to, idType, input.card, opts);
+    if ('cardId' in input) {
+      const id = await this.sendCardByReference(to, idType, input.cardId, opts);
+      return this.makeResult([id]);
+    }
     if ('shareChat' in input) return this.sendShareChat(to, idType, input.shareChat.chatId, opts);
     if ('shareUser' in input) return this.sendShareUser(to, idType, input.shareUser.userId, opts);
     if ('sticker' in input) return this.sendSticker(to, idType, input.sticker.fileKey, opts);
@@ -409,6 +413,24 @@ export class OutboundSender {
       content: { type: 'card', data: { card_id: cardId } },
       replyTo: opts.replyTo,
       replyInThread: opts.replyInThread,
+    });
+  }
+
+  /**
+   * Full card replace by `card_id` via cardkit.v1.card.update — the entity-API
+   * counterpart to {@link patchCard} (which targets a message_id). `sequence`
+   * must increase monotonically per card so out-of-order updates are rejected
+   * server-side rather than silently clobbering newer content. `uuid` is
+   * derived from cardId + sequence for idempotency.
+   */
+  async updateCardFull(cardId: string, cardJson: object, sequence: number): Promise<void> {
+    await this.client.cardkit.v1.card.update({
+      path: { card_id: cardId },
+      data: {
+        card: { type: 'card_json', data: JSON.stringify(cardJson) },
+        sequence,
+        uuid: `u_${cardId}_${sequence}`,
+      } as never,
     });
   }
 

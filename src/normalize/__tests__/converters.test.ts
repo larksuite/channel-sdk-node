@@ -9,6 +9,7 @@ import { convertShareChat, convertShareUser } from '../converters/share';
 import { convertSticker } from '../converters/sticker';
 import { convertText } from '../converters/text';
 import { convertVideo } from '../converters/video';
+import { convertVideoChat } from '../converters/video-chat';
 
 const ctx: ConvertContext = {
   messageId: 'om_x',
@@ -81,6 +82,20 @@ describe('simple converters', () => {
   test('share_user', async () => {
     const r = await convertShareUser('{"user_id":"ou_bob"}', ctx);
     expect(r.content).toBe('<contact_card id="ou_bob"/>');
+  });
+
+  test('video_chat includes meet_number from raw payload', async () => {
+    const raw =
+      '{"topic":"与 AI 开早会","meet_number":"976464587","start_time":"1780984497000","end_time":"1780985170000"}';
+    const r = await convertVideoChat(raw, ctx);
+    expect(r.content).toContain('📹 与 AI 开早会');
+    expect(r.content).toContain('🔢 976464587');
+  });
+
+  test('video_chat without meet_number omits the line', async () => {
+    const r = await convertVideoChat('{"topic":"sync"}', ctx);
+    expect(r.content).toContain('📹 sync');
+    expect(r.content).not.toContain('🔢');
   });
 });
 

@@ -88,6 +88,31 @@ describe('downloadResource stream wrapper', () => {
       message: expect.stringContaining('unexpected download response type'),
     });
   });
+
+  test('downloadResourceWithMeta surfaces response content-type (params stripped)', async () => {
+    const ch = createChannel();
+    const payload = Buffer.from('jpeg-bytes');
+    (ch.rawClient.im.v1.messageResource as any).get = vi.fn().mockResolvedValue({
+      getReadableStream: () => Readable.from([payload]),
+      writeFile: async () => '/tmp/x',
+      headers: { 'content-type': 'image/jpeg; charset=binary' },
+    });
+    const { buffer, contentType } = await ch.downloadResourceWithMeta('om_1', 'img_1', 'image');
+    expect(buffer.equals(payload)).toBe(true);
+    expect(contentType).toBe('image/jpeg');
+  });
+
+  test('downloadResourceWithMeta returns undefined content-type when header absent', async () => {
+    const ch = createChannel();
+    const payload = Buffer.from('x');
+    (ch.rawClient.im.v1.messageResource as any).get = vi.fn().mockResolvedValue({
+      getReadableStream: () => Readable.from([payload]),
+      writeFile: async () => '/tmp/x',
+      headers: {},
+    });
+    const { contentType } = await ch.downloadResourceWithMeta('om_1', 'f_1', 'file');
+    expect(contentType).toBeUndefined();
+  });
 });
 
 describe('reaction add / remove round-trip', () => {
@@ -501,5 +526,187 @@ describe('getChatMode', () => {
     const apiErr = new Error('permission_denied');
     (ch.rawClient.im.v1.chat as any).get = vi.fn().mockRejectedValue(apiErr);
     await expect(ch.getChatMode('oc_x')).rejects.toBe(apiErr);
+  });
+});
+
+describe('createChat', () => {
+  test('maps options to im.v1.chat.create and returns chat_id', async () => {
+    const ch = createChannel();
+    const create = vi.fn().mockResolvedValue({ data: { chat_id: 'oc_new' } });
+    (ch.rawClient.im.v1.chat as any).create = create;
+
+    const r = await ch.createChat({
+      name: 'AI standup',
+      description: 'daily',
+      inviteUserIds: ['ou_a', 'ou_b'],
+    });
+    expect(r).toEqual({ chatId: 'oc_new' });
+    expect(create).toHaveBeenCalledWith({
+      params: { user_id_type: 'open_id' },
+      data: {
+        name: 'AI standup',
+        description: 'daily',
+        chat_mode: 'group',
+        chat_type: 'private',
+        user_id_list: ['ou_a', 'ou_b'],
+      },
+    });
+  });
+
+  test('honors explicit userIdType / chatType', async () => {
+    const ch = createChannel();
+    const create = vi.fn().mockResolvedValue({ data: { chat_id: 'oc_x' } });
+    (ch.rawClient.im.v1.chat as any).create = create;
+    await ch.createChat({
+      name: 'g',
+      inviteUserIds: ['u1'],
+      userIdType: 'user_id',
+      chatType: 'public',
+    });
+    const call = create.mock.calls[0][0];
+    expect(call.params.user_id_type).toBe('user_id');
+    expect(call.data.chat_type).toBe('public');
+  });
+
+  test('throws when chat_id missing', async () => {
+    const ch = createChannel();
+    (ch.rawClient.im.v1.chat as any).create = vi.fn().mockResolvedValue({ data: {} });
+    await expect(ch.createChat({ name: 'g' })).rejects.toMatchObject({
+      code: 'unknown',
+      message: expect.stringContaining('no chat_id'),
+    });
+  });
+});
+
+describe('listChats', () => {
+  test('follows pagination and accumulates {id,name}', async () => {
+    const ch = createChannel();
+    const list = vi
+      .fn()
+      .mockResolvedValueOnce({
+        data: {
+          items: [{ chat_id: 'oc_1', name: 'A' }],
+          has_more: true,
+          page_token: 'tok2',
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          items: [{ chat_id: 'oc_2', name: 'B' }],
+          has_more: false,
+        },
+      });
+    (ch.rawClient.im.v1.chat as any).list = list;
+
+    const chats = await ch.listChats();
+    expect(chats).toEqual([
+      { id: 'oc_1', name: 'A' },
+      { id: 'oc_2', name: 'B' },
+    ]);
+    expect(list).toHaveBeenNthCalledWith(1, {
+      params: { page_size: 100, page_token: undefined },
+    });
+    expect(list).toHaveBeenNthCalledWith(2, {
+      params: { page_size: 100, page_token: 'tok2' },
+    });
+  });
+
+  test('stops at maxPages even when has_more stays true', async () => {
+    const ch = createChannel();
+    const list = vi.fn().mockResolvedValue({
+      data: { items: [{ chat_id: 'oc_x', name: 'X' }], has_more: true, page_token: 't' },
+    });
+    (ch.rawClient.im.v1.chat as any).list = list;
+    const chats = await ch.listChats({ maxPages: 2 });
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(chats).toHaveLength(2);
+  });
+
+  test('clamps pageSize to 100', async () => {
+    const ch = createChannel();
+    const list = vi.fn().mockResolvedValue({ data: { items: [], has_more: false } });
+    (ch.rawClient.im.v1.chat as any).list = list;
+    await ch.listChats({ pageSize: 5000 });
+    expect(list.mock.calls[0][0].params.page_size).toBe(100);
+  });
+});
+
+describe('getAppInfo', () => {
+  test('uses constructed appId and extracts owner_id', async () => {
+    const ch = createChannel();
+    const get = vi.fn().mockResolvedValue({
+      data: { app: { app_name: 'MyBot', owner: { owner_id: 'ou_owner' } } },
+    });
+    (ch.rawClient.application.v6.application as any).get = get;
+
+    const info = await ch.getAppInfo();
+    expect(info).toEqual({ ownerId: 'ou_owner', appName: 'MyBot' });
+    expect(get).toHaveBeenCalledWith({
+      path: { app_id: 'cli_test' },
+      params: { lang: 'zh_cn', user_id_type: 'open_id' },
+    });
+  });
+});
+
+describe('fetchRawMessage', () => {
+  test('returns raw items and defaults card_msg_content_type', async () => {
+    const ch = createChannel();
+    const items = [{ message_id: 'om_1', msg_type: 'text', body: { content: '{"text":"hi"}' } }];
+    const get = vi.fn().mockResolvedValue({ data: { items } });
+    (ch.rawClient.im.v1.message as any).get = get;
+
+    const r = await ch.fetchRawMessage('om_1');
+    expect(r).toBe(items);
+    expect(get).toHaveBeenCalledWith({
+      path: { message_id: 'om_1' },
+      params: { card_msg_content_type: 'user_card_content' },
+    });
+  });
+
+  test('omits param when cardContentType is null', async () => {
+    const ch = createChannel();
+    const get = vi.fn().mockResolvedValue({ data: { items: [] } });
+    (ch.rawClient.im.v1.message as any).get = get;
+    await ch.fetchRawMessage('om_1', { cardContentType: null });
+    expect(get).toHaveBeenCalledWith({ path: { message_id: 'om_1' }, params: undefined });
+  });
+});
+
+describe('managed card lifecycle', () => {
+  test('createCard → cardkit.v1.card.create, returns card_id', async () => {
+    const ch = createChannel();
+    const create = vi.fn().mockResolvedValue({ data: { card_id: 'cd_1' } });
+    (ch.rawClient.cardkit.v1.card as any).create = create;
+
+    const r = await ch.createCard({ schema: '2.0', body: {} });
+    expect(r).toEqual({ cardId: 'cd_1' });
+    const call = create.mock.calls[0][0];
+    expect(call.data.type).toBe('card_json');
+    expect(JSON.parse(call.data.data)).toEqual({ schema: '2.0', body: {} });
+  });
+
+  test('updateCardById → cardkit.v1.card.update with card_id + sequence', async () => {
+    const ch = createChannel();
+    const update = vi.fn().mockResolvedValue({ data: {} });
+    (ch.rawClient.cardkit.v1.card as any).update = update;
+
+    await ch.updateCardById('cd_1', { schema: '2.0' }, 7);
+    const call = update.mock.calls[0][0];
+    expect(call.path).toEqual({ card_id: 'cd_1' });
+    expect(call.data.sequence).toBe(7);
+    expect(call.data.card.type).toBe('card_json');
+    expect(JSON.parse(call.data.card.data)).toEqual({ schema: '2.0' });
+  });
+
+  test('send({ cardId }) routes interactive message referencing the card', async () => {
+    const ch = createChannel();
+    const create = vi.fn().mockResolvedValue({ data: { message_id: 'om_card' } });
+    (ch.rawClient.im.v1.message as any).create = create;
+
+    const r = await ch.send('oc_abc', { cardId: 'cd_1' });
+    expect(r.messageId).toBe('om_card');
+    const call = create.mock.calls[0][0];
+    expect(call.data.msg_type).toBe('interactive');
+    expect(JSON.parse(call.data.content)).toEqual({ type: 'card', data: { card_id: 'cd_1' } });
   });
 });

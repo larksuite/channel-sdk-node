@@ -27,16 +27,20 @@ export {
 export type { QRCodeInfo, RegisterAppOptions, RegisterAppResult } from './registration';
 export { registerApp } from './registration';
 export type {
+  AppInfo,
   BotAddedEvent,
   BotIdentity,
   CardActionEvent,
   CardStreamController,
   CardStreamProducer,
   ChatInfo,
+  ChatSummary,
   ChatType,
   CommentEvent,
+  CreateChatOptions,
   EventMap,
   EventName,
+  IdType,
   LarkChannelErrorCode,
   LarkChannelOptions,
   MarkdownStreamController,

@@ -29,8 +29,11 @@ import { OutboundSender } from './outbound';
 import { classifyError } from './outbound/errors';
 import { SafetyPipeline } from './safety';
 import {
+  type AppInfo,
   type BotIdentity,
   type ChatInfo,
+  type ChatSummary,
+  type CreateChatOptions,
   type EventMap,
   type EventName,
   LarkChannelError,
@@ -361,6 +364,30 @@ export class LarkChannel {
   }
 
   /**
+   * Create a standalone CardKit 2.0 card entity (`cardkit.v1.card.create`) and
+   * return its `card_id`. The card isn't attached to any message yet — send a
+   * message that references it via `channel.send(to, { cardId })`, then drive
+   * it with {@link updateCardById}. This is the managed-card lifecycle: one
+   * entity, many in-place updates, decoupled from the message that displays it.
+   */
+  async createCard(cardJson: object): Promise<{ cardId: string }> {
+    const cardId = await this.sender.createCardInstance(cardJson);
+    return { cardId };
+  }
+
+  /**
+   * Full-content update of a card entity by `card_id` (`cardkit.v1.card.update`).
+   * `sequence` must strictly increase across calls for the same card — Feishu
+   * rejects stale/out-of-order sequences so a slow update can't overwrite a
+   * newer one. Unlike {@link updateCard} (which targets a message_id), this
+   * updates the shared entity, so every message referencing the card_id
+   * re-renders.
+   */
+  async updateCardById(cardId: string, cardJson: object, sequence: number): Promise<void> {
+    await this.sender.updateCardFull(cardId, cardJson, sequence);
+  }
+
+  /**
    * Edit an already-sent message's text/post content. Uses `im.v1.message.update`
    * which (per Feishu docs) only supports editing text and rich-text (post)
    * messages. For cards, use {@link updateCard} instead — a wrong attempt to
@@ -456,11 +483,106 @@ export class LarkChannel {
    * (file / audio / video / sticker) — matching `ResourceDescriptor.type`.
    */
   async downloadResource(messageId: string, fileKey: string, type: ResourceType): Promise<Buffer> {
+    const { buffer } = await this.downloadResourceWithMeta(messageId, fileKey, type);
+    return buffer;
+  }
+
+  /**
+   * Like {@link downloadResource}, but also returns the server's response
+   * `content-type` (when present). Feishu's `im.v1.messageResource.get`
+   * carries the resource's real MIME in the response headers — needed to pick
+   * an accurate file extension. `contentType` is the media type with any
+   * parameters (e.g. `; charset=...`) stripped, or `undefined` when the header
+   * is absent (e.g. a defensive raw-`Buffer` response). Callers should fall
+   * back to a per-kind default in that case.
+   */
+  async downloadResourceWithMeta(
+    messageId: string,
+    fileKey: string,
+    type: ResourceType,
+  ): Promise<{ buffer: Buffer; contentType?: string }> {
     const r = await this.rawClient.im.v1.messageResource.get({
       path: { message_id: messageId, file_key: fileKey },
       params: { type },
     });
-    return await bufferFromStream(r as unknown);
+    const buffer = await bufferFromStream(r as unknown);
+    return { buffer, contentType: extractContentType(r as unknown) };
+  }
+
+  /**
+   * Create a group chat (`im.v1.chat.create`) and return its `chat_id`.
+   * `inviteUserIds` seeds the membership; the ids are interpreted per
+   * `userIdType` (default `'open_id'`). Requires the `im:chat` scope.
+   */
+  async createChat(opts: CreateChatOptions): Promise<{ chatId: string }> {
+    const r = await this.rawClient.im.v1.chat.create({
+      params: { user_id_type: opts.userIdType ?? 'open_id' },
+      data: {
+        name: opts.name,
+        description: opts.description,
+        chat_mode: opts.chatMode ?? 'group',
+        chat_type: opts.chatType ?? 'private',
+        user_id_list: opts.inviteUserIds,
+      } as never,
+    });
+    const chatId = (r as { data?: { chat_id?: string } }).data?.chat_id;
+    if (!chatId) {
+      throw new LarkChannelError('unknown', 'im.v1.chat.create returned no chat_id');
+    }
+    return { chatId };
+  }
+
+  /**
+   * List the chats this bot is a member of (`im.v1.chat.list`), following
+   * pagination automatically. `pageSize` is clamped to Feishu's max of 100;
+   * `maxPages` caps how many pages are fetched (default 10) so an account in
+   * thousands of chats can't spin forever. Returns `{ id, name }` per chat.
+   */
+  async listChats(opts?: { pageSize?: number; maxPages?: number }): Promise<ChatSummary[]> {
+    const pageSize = Math.min(Math.max(opts?.pageSize ?? 100, 1), 100);
+    const maxPages = opts?.maxPages ?? 10;
+    const out: ChatSummary[] = [];
+    let pageToken: string | undefined;
+    for (let page = 0; page < maxPages; page++) {
+      const r = (await this.rawClient.im.v1.chat.list({
+        params: { page_size: pageSize, page_token: pageToken },
+      })) as {
+        data?: {
+          items?: Array<{ chat_id?: string; name?: string }>;
+          has_more?: boolean;
+          page_token?: string;
+        };
+      };
+      const d = r?.data;
+      for (const it of d?.items ?? []) {
+        if (it.chat_id) out.push({ id: it.chat_id, name: it.name ?? '' });
+      }
+      if (!d?.has_more || !d.page_token) break;
+      pageToken = d.page_token;
+    }
+    return out;
+  }
+
+  /**
+   * Fetch this app's own metadata (`application.v6.application.get`) — the
+   * `app_id` is the one the channel was constructed with, so callers don't
+   * pass it. Primarily used to resolve the app owner/admin (`ownerId`) for
+   * access control. Requires the application-info scope.
+   */
+  async getAppInfo(opts?: {
+    lang?: 'zh_cn' | 'en_us' | 'ja_jp';
+    userIdType?: 'open_id' | 'user_id' | 'union_id';
+  }): Promise<AppInfo> {
+    const r = await this.rawClient.application.v6.application.get({
+      path: { app_id: this.opts.appId },
+      params: {
+        lang: opts?.lang ?? 'zh_cn',
+        user_id_type: opts?.userIdType ?? 'open_id',
+      },
+    });
+    const app = (r as { data?: { app?: { owner?: { owner_id?: string }; app_name?: string } } })
+      .data?.app;
+    return { ownerId: app?.owner?.owner_id, appName: app?.app_name };
   }
 
   async getChatInfo(chatId: string): Promise<ChatInfo> {
@@ -517,6 +639,31 @@ export class LarkChannel {
    * `undefined` when the message can't be fetched or has no parent item.
    * `stripBotMentions` is off here so the raw quoted content is preserved.
    */
+  /**
+   * Fetch a message's raw `data.items[]` (`im.v1.message.get`) without running
+   * them through {@link normalize} — for callers that need fidelity the
+   * normalizer drops: original `body.content` JSON, `mentions`, `sender.id`,
+   * `create_time`. For merge_forward the list is the parent followed by its
+   * descendants (each carrying `upper_message_id`).
+   *
+   * `cardContentType` maps to the `card_msg_content_type` query param.
+   * Defaults to `'user_card_content'` so interactive messages return the
+   * original CardKit 2.0 card JSON (`user_dsl`) rather than the v1-canonical
+   * downgrade. Pass `null` to omit the param entirely.
+   */
+  async fetchRawMessage(
+    messageId: string,
+    opts?: { cardContentType?: 'user_card_content' | string | null },
+  ): Promise<ApiMessageItem[]> {
+    const cardContentType =
+      opts?.cardContentType === undefined ? 'user_card_content' : opts.cardContentType;
+    const r = (await this.rawClient.im.v1.message.get({
+      path: { message_id: messageId },
+      params: (cardContentType ? { card_msg_content_type: cardContentType } : undefined) as never,
+    })) as { data?: { items?: ApiMessageItem[] } };
+    return r?.data?.items ?? [];
+  }
+
   async fetchMessage(messageId: string): Promise<NormalizedMessage | undefined> {
     let items: ApiMessageItem[];
     try {
@@ -756,6 +903,23 @@ export function createLarkChannel(opts: LarkChannelOptions): LarkChannel {
 /** Mask `user:pass@` credentials in a proxy URL before logging it. */
 function redactProxyUrl(url: string): string {
   return url.replace(/\/\/[^:@/]+:[^@/]+@/, '//[redacted]@');
+}
+
+/**
+ * Pull the `content-type` media type out of a download response's headers.
+ * The code-gen download endpoints expose axios response headers on the
+ * wrapper object; header names are case-insensitive, so check both casings.
+ * Strips any `; charset=…` / `; boundary=…` parameters and returns the bare
+ * media type (lowercased), or `undefined` when no usable header is present.
+ */
+function extractContentType(raw: unknown): string | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const headers = (raw as { headers?: Record<string, unknown> }).headers;
+  if (!headers) return undefined;
+  const value = headers['content-type'] ?? headers['Content-Type'];
+  if (typeof value !== 'string') return undefined;
+  const mediaType = value.split(';', 1)[0]?.trim().toLowerCase();
+  return mediaType || undefined;
 }
 
 async function bufferFromStream(raw: unknown): Promise<Buffer> {

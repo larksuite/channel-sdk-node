@@ -156,6 +156,28 @@ describe('CommentSurface.reply', () => {
     ).rejects.toBeDefined();
     expect(commentCreate).not.toHaveBeenCalled();
   });
+
+  test('{ topLevel: true } skips in-thread probe and posts top-level directly', async () => {
+    const request = vi.fn();
+    const commentCreate = vi.fn().mockResolvedValue({ data: {} });
+    const { surface } = makeSurface({ request, commentCreate });
+    await surface.reply({ fileToken: 'd', fileType: 'docx' }, 'cmt1', 'whole-doc', {
+      topLevel: true,
+    });
+    expect(request).not.toHaveBeenCalled();
+    expect(commentCreate).toHaveBeenCalledTimes(1);
+    const arg = commentCreate.mock.calls[0][0];
+    expect(arg.data.reply_list.replies[0].content.elements[0].text_run.text).toBe('whole-doc');
+  });
+
+  test('replyTopLevel posts a fresh top-level comment without probing', async () => {
+    const request = vi.fn();
+    const commentCreate = vi.fn().mockResolvedValue({ data: {} });
+    const { surface } = makeSurface({ request, commentCreate });
+    await surface.replyTopLevel({ fileToken: 'd', fileType: 'docx' }, 'direct');
+    expect(request).not.toHaveBeenCalled();
+    expect(commentCreate).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('CommentSurface reactions', () => {

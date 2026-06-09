@@ -143,8 +143,23 @@ export class CommentSurface {
    * Reply to a comment in-thread. Whole-document comments reject in-thread
    * replies with 1069302 (they have no thread, only a flat list) — in that
    * case post a fresh top-level comment instead.
+   *
+   * When the caller already knows the comment is whole-document (e.g. from
+   * {@link FetchedComment.isWhole}), pass `{ topLevel: true }` to skip the
+   * doomed in-thread probe and post top-level directly — saving one
+   * round-trip. See {@link replyTopLevel} for the explicit form.
    */
-  async reply(target: CommentTarget, commentId: string, text: string): Promise<void> {
+  async reply(
+    target: CommentTarget,
+    commentId: string,
+    text: string,
+    opts?: { topLevel?: boolean },
+  ): Promise<void> {
+    if (opts?.topLevel) {
+      await this.replyTopLevel(target, text);
+      return;
+    }
+
     const url =
       `/open-apis/drive/v1/files/${encodeURIComponent(target.fileToken)}/comments/` +
       `${encodeURIComponent(commentId)}/replies?file_type=${encodeURIComponent(target.fileType)}`;
@@ -164,6 +179,17 @@ export class CommentSurface {
       });
     }
 
+    await this.replyTopLevel(target, text);
+    this.logger.info?.('channel: comment replied', { mode: 'new-top-level' });
+  }
+
+  /**
+   * Post a fresh top-level comment on the file (no in-thread probe). Use this
+   * when you already know in-thread replies won't apply — chiefly
+   * whole-document comments, where {@link reply} would otherwise waste a
+   * round-trip discovering 1069302.
+   */
+  async replyTopLevel(target: CommentTarget, text: string): Promise<void> {
     await this.client.drive.v1.fileComment.create({
       params: { file_type: target.fileType as 'doc' | 'docx' },
       path: { file_token: target.fileToken },
@@ -173,7 +199,6 @@ export class CommentSurface {
         },
       },
     });
-    this.logger.info?.('channel: comment replied', { mode: 'new-top-level' });
   }
 
   /**

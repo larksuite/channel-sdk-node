@@ -69,6 +69,7 @@ export type SendInput =
   | { audio: { source: string | Buffer; duration?: number } }
   | { video: { source: string | Buffer; duration?: number; coverImageKey?: string } }
   | { card: object }
+  | { cardId: string }
   | { shareChat: { chatId: string } }
   | { shareUser: { userId: string } }
   | { sticker: { fileKey: string } };
@@ -429,6 +430,34 @@ export interface ChatInfo {
   chatType: 'p2p' | 'group';
   ownerId?: string;
   memberCount?: number;
+}
+
+export type IdType = 'open_id' | 'user_id' | 'union_id';
+
+export interface CreateChatOptions {
+  name: string;
+  description?: string;
+  /** Users to seed the new chat with. Interpreted per {@link userIdType}. */
+  inviteUserIds?: string[];
+  /** ID convention for {@link inviteUserIds}. Defaults to `'open_id'`. */
+  userIdType?: IdType;
+  /** Defaults to `'group'`. */
+  chatMode?: 'group';
+  /** Visibility — `'private'` (default) or `'public'`. */
+  chatType?: 'private' | 'public';
+}
+
+/** One entry from {@link LarkChannel.listChats}. */
+export interface ChatSummary {
+  id: string;
+  name: string;
+}
+
+/** Subset of `application.v6.application.get` the channel surfaces. */
+export interface AppInfo {
+  /** open_id (or the requested id type) of the app's owner/admin. */
+  ownerId?: string;
+  appName?: string;
 }
 
 export type ResourceType = 'image' | 'file';

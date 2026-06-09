@@ -3,6 +3,7 @@ import { millisToDatetime, safeParse } from '../utils';
 
 interface VideoChatContent {
   topic?: string;
+  meet_number?: string;
   start_time?: string | number;
 }
 
@@ -14,6 +15,7 @@ export const convertVideoChat: ContentConverterFn = async (raw, _ctx) => {
 
   const lines: string[] = [];
   if (parsed.topic) lines.push(`📹 ${parsed.topic}`);
+  if (parsed.meet_number) lines.push(`🔢 ${parsed.meet_number}`);
   const start = millisToDatetime(parsed.start_time);
   if (start) lines.push(`🕙 ${start}`);
 
