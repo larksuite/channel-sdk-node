@@ -1,3 +1,6 @@
+import { createWriteStream } from 'node:fs';
+import { stat, writeFile } from 'node:fs/promises';
+import { pipeline } from 'node:stream/promises';
 import {
   Client,
   Domain,
@@ -510,6 +513,35 @@ export class LarkChannel {
   }
 
   /**
+   * Stream a message resource straight to `destPath` without ever holding the
+   * whole payload in memory — the HTTP response is `pipe`d to the file, so a
+   * 100 MB attachment costs only stream-buffer overhead, not 100 MB of JS
+   * heap. Prefer this over {@link downloadResource} /
+   * {@link downloadResourceWithMeta} whenever the bytes are headed for disk
+   * (e.g. a size-limited attachment cache): those materialize a full `Buffer`
+   * via `Buffer.concat`, which can OOM the process when several large
+   * downloads run concurrently.
+   *
+   * Returns the server `content-type` (params stripped; `undefined` when
+   * absent) for MIME/extension detection, and the number of bytes written.
+   * The parent directory of `destPath` must already exist.
+   */
+  async downloadResourceToFile(
+    messageId: string,
+    fileKey: string,
+    type: ResourceType,
+    destPath: string,
+  ): Promise<{ contentType?: string; bytesWritten: number }> {
+    const r = await this.rawClient.im.v1.messageResource.get({
+      path: { message_id: messageId, file_key: fileKey },
+      params: { type },
+    });
+    const contentType = extractContentType(r as unknown);
+    const bytesWritten = await streamToFile(r as unknown, destPath);
+    return { contentType, bytesWritten };
+  }
+
+  /**
    * Create a group chat (`im.v1.chat.create`) and return its `chat_id`.
    * `inviteUserIds` seeds the membership; the ids are interpreted per
    * `userIdType` (default `'open_id'`). Requires the `im:chat` scope.
@@ -920,6 +952,48 @@ function extractContentType(raw: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const mediaType = value.split(';', 1)[0]?.trim().toLowerCase();
   return mediaType || undefined;
+}
+
+/**
+ * Stream a download response to disk without buffering it in heap. The
+ * code-gen download endpoints expose the body via `getReadableStream()`,
+ * which we `pipeline` straight into a write stream (back-pressure aware,
+ * cleans up on error). Falls back to writing an already-materialized
+ * `Buffer` / `Uint8Array` for the defensive non-stream response shapes —
+ * those are already in memory, so there's nothing to stream. Returns the
+ * number of bytes written.
+ */
+async function streamToFile(raw: unknown, destPath: string): Promise<number> {
+  if (typeof raw === 'object' && raw !== null) {
+    const r = raw as {
+      data?: unknown;
+      getReadableStream?: () => NodeJS.ReadableStream;
+    };
+    if (typeof r.getReadableStream === 'function') {
+      await pipeline(r.getReadableStream(), createWriteStream(destPath));
+      const { size } = await stat(destPath);
+      return size;
+    }
+    if (Buffer.isBuffer(r.data)) {
+      await writeFile(destPath, r.data);
+      return r.data.length;
+    }
+    if (r.data instanceof Uint8Array) {
+      const buf = Buffer.from(r.data);
+      await writeFile(destPath, buf);
+      return buf.length;
+    }
+  }
+  if (Buffer.isBuffer(raw)) {
+    await writeFile(destPath, raw);
+    return raw.length;
+  }
+  if (raw instanceof Uint8Array) {
+    const buf = Buffer.from(raw);
+    await writeFile(destPath, buf);
+    return buf.length;
+  }
+  throw new LarkChannelError('unknown', 'unexpected download response type');
 }
 
 async function bufferFromStream(raw: unknown): Promise<Buffer> {

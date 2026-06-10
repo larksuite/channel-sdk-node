@@ -10,6 +10,9 @@
  *     msg_type on the wire.
  */
 
+import { readFile, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { LoggerLevel } from '@larksuiteoapi/node-sdk';
 import { Readable } from 'stream';
 import { createLarkChannel } from '../index';
@@ -112,6 +115,45 @@ describe('downloadResource stream wrapper', () => {
     });
     const { contentType } = await ch.downloadResourceWithMeta('om_1', 'f_1', 'file');
     expect(contentType).toBeUndefined();
+  });
+});
+
+describe('downloadResourceToFile (streaming, no heap buffering)', () => {
+  test('pipes the response stream to disk and reports size + content-type', async () => {
+    const ch = createChannel();
+    const payload = Buffer.from('streamed-attachment-bytes');
+    const dest = join(tmpdir(), `chan-dl-${Date.now()}-${Math.random().toString(36).slice(2)}.bin`);
+    (ch.rawClient.im.v1.messageResource as any).get = vi.fn().mockResolvedValue({
+      getReadableStream: () => Readable.from([payload]),
+      writeFile: async () => dest,
+      headers: { 'content-type': 'application/pdf; charset=binary' },
+    });
+
+    try {
+      const r = await ch.downloadResourceToFile('om_1', 'f_1', 'file', dest);
+      expect(r.contentType).toBe('application/pdf');
+      expect(r.bytesWritten).toBe(payload.length);
+      const onDisk = await readFile(dest);
+      expect(onDisk.equals(payload)).toBe(true);
+      expect((await stat(dest)).size).toBe(payload.length);
+    } finally {
+      await rm(dest, { force: true });
+    }
+  });
+
+  test('falls back to writing a defensive raw-Buffer response', async () => {
+    const ch = createChannel();
+    const payload = Buffer.from('legacy-buffer');
+    const dest = join(tmpdir(), `chan-dl-${Date.now()}-${Math.random().toString(36).slice(2)}.bin`);
+    (ch.rawClient.im.v1.messageResource as any).get = vi.fn().mockResolvedValue(payload);
+
+    try {
+      const r = await ch.downloadResourceToFile('om_1', 'f_1', 'file', dest);
+      expect(r.bytesWritten).toBe(payload.length);
+      expect((await readFile(dest)).equals(payload)).toBe(true);
+    } finally {
+      await rm(dest, { force: true });
+    }
   });
 });
 
