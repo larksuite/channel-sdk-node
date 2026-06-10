@@ -1,6 +1,6 @@
 {
   "name": "@larksuite/channel",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Channel SDK — let agents and external services integrate with the Feishu/Lark messaging system: reliable inbound events, message normalization, streaming replies, media upload, card interactions.",
   "keywords": [
     "feishu",
@@ -51,7 +51,7 @@
     "prepublishOnly": "pnpm typecheck && pnpm test && pnpm build"
   },
   "dependencies": {
-    "@larksuiteoapi/node-sdk": "^1.66.1",
+    "@larksuiteoapi/node-sdk": "^1.67.0",
     "https-proxy-agent": "^9.0.0"
   },
   "publishConfig": {
