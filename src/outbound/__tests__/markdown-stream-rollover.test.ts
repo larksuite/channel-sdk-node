@@ -20,6 +20,7 @@ function makeStubSender(
     cap?: number;
     throttleMs?: number;
     throttleChars?: number;
+    maxCardAgeMs?: number;
     updateContentImpl?: () => Promise<void>;
   } = {},
 ): { sender: any; calls: SenderCalls; logger: { warn: ReturnType<typeof vi.fn> } } {
@@ -41,6 +42,7 @@ function makeStubSender(
       streamThrottleMs: opts.throttleMs ?? 0,
       streamThrottleChars: opts.throttleChars ?? 1,
       streamMaxElementChars: opts.cap ?? 1000,
+      streamMaxCardAgeMs: opts.maxCardAgeMs,
     },
   };
 
@@ -97,7 +99,7 @@ describe('MarkdownStreamController rollover', () => {
     const ctrl = new MarkdownStreamControllerImpl(sender, 'oc_x', 'chat_id', {});
 
     const result = await ctrl.run(async (c) => {
-      await c.append('a'.repeat(80) + '\n' + 'b'.repeat(80));
+      await c.append(`${'a'.repeat(40)}\n${'b'.repeat(40)}`);
     });
 
     // First sendCardByReference returned 'om_1' — that's the head.
@@ -118,7 +120,36 @@ describe('MarkdownStreamController rollover', () => {
     expect(calls.createCardInstance.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
-  test('update API failure → marks streamingFailed, run() still resolves', async () => {
+  test('card age rollover continues in a follow-up card before auto-close', async () => {
+    const { sender, calls } = makeStubSender({ cap: 1000, maxCardAgeMs: 1 });
+    const ctrl = new MarkdownStreamControllerImpl(sender, 'oc_x', 'chat_id', {});
+
+    await ctrl.run(async (c) => {
+      await c.append('first chunk');
+      await flushAll();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await c.append(' second chunk');
+      await flushAll();
+    });
+
+    expect(calls.createCardInstance).toHaveBeenCalledTimes(2);
+    expect(calls.sendCardByReference).toHaveBeenCalledTimes(2);
+
+    const oldCardContinuation = calls.updateCardElementContent.mock.calls.find(
+      ([cardId, _elementId, content]) =>
+        cardId === 'card_1' && String(content).includes('输出已自动续到下一条消息'),
+    );
+    expect(oldCardContinuation).toBeTruthy();
+
+    const secondCardSpec = calls.createCardInstance.mock.calls[1][0] as {
+      body?: { elements?: Array<{ content?: string }> };
+    };
+    expect(secondCardSpec.body?.elements?.[0]?.content).toContain('接上一条消息继续输出');
+    const updates = calls.updateCardElementContent.mock.calls;
+    expect(updates[updates.length - 1]?.[2]).toContain('接上一条消息继续输出');
+  });
+
+  test('update API failure → marks streamingFailed and rejects at terminal flush', async () => {
     let updateCount = 0;
     const { sender, logger } = makeStubSender({
       cap: 1000,
@@ -129,13 +160,13 @@ describe('MarkdownStreamController rollover', () => {
     });
     const ctrl = new MarkdownStreamControllerImpl(sender, 'oc_x', 'chat_id', {});
 
-    // Should not throw — failure is contained.
-    const result = await ctrl.run(async (c) => {
-      await c.append('first chunk');
-      await c.append('second chunk');
-    });
+    await expect(
+      ctrl.run(async (c) => {
+        await c.append('first chunk');
+        await c.append('second chunk');
+      }),
+    ).rejects.toThrow('230099 element exceeds the limit');
 
-    expect(result.messageId).toBe('om_1');
     expect(logger.warn).toHaveBeenCalled();
     // Subsequent updates should be skipped after the first failure.
     // (We can't assert exact count without timing knowledge, but the
@@ -149,7 +180,7 @@ describe('MarkdownStreamController rollover', () => {
     await expect(
       ctrl.run(async (c) => {
         // Trigger a rollover so the latest card is the rollover one.
-        await c.append('x'.repeat(80) + '\n' + 'y'.repeat(50));
+        await c.append(`${'x'.repeat(80)}\n${'y'.repeat(50)}`);
         throw new Error('producer failure');
       }),
     ).rejects.toThrow('producer failure');
@@ -178,8 +209,8 @@ describe('MarkdownStreamController rollover', () => {
       const c2 = 'c'.repeat(60);
       // Simulate accumulated mode — each chunk includes everything so far.
       await c.append(a);
-      await c.append(a + '\n' + b); // accumulated + new line
-      await c.append(a + '\n' + b + '\n' + c2); // accumulated + another
+      await c.append(`${a}\n${b}`); // accumulated + new line
+      await c.append(`${a}\n${b}\n${c2}`); // accumulated + another
     });
 
     // At least one rollover happened; final card's last update should

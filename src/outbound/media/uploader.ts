@@ -1,4 +1,4 @@
-import type { Client } from '@larksuiteoapi/node-sdk';
+import { type Client, withTenantToken } from '@larksuiteoapi/node-sdk';
 import fs from 'fs';
 import http from 'http';
 import https from 'https';
@@ -254,9 +254,17 @@ export class MediaUploader {
         file: buffer,
       };
       if (durationMs != null) data.duration = durationMs;
-      const r = await this.client.im.v1.file.create({
-        data: data as never,
-      });
+      const tenantAccessToken = await this.client.tokenManager?.getTenantAccessToken({});
+      const r = tenantAccessToken
+        ? await this.client.im.v1.file.create(
+            {
+              data: data as never,
+            },
+            withTenantToken(tenantAccessToken),
+          )
+        : await this.client.im.v1.file.create({
+            data: data as never,
+          });
       const key =
         (r as { file_key?: string } | null)?.file_key ??
         (r as { data?: { file_key?: string } } | null)?.data?.file_key;

@@ -312,6 +312,27 @@ describe('MediaUploader.uploadFile response shape', () => {
     });
     expect(r.fileKey).toBe('file_nested');
   });
+
+  test('passes tenant access token when uploading files', async () => {
+    const { client, fileCreate } = createMockClient();
+    client.tokenManager = {
+      getTenantAccessToken: vi.fn(async () => 'tenant-token'),
+    };
+
+    await new MediaUploader(client).upload({
+      kind: 'file',
+      source: Buffer.from('plain'),
+      fileName: 'a.txt',
+    });
+
+    expect(client.tokenManager.getTenantAccessToken).toHaveBeenCalledWith({});
+    expect(fileCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ file_name: 'a.txt' }),
+      }),
+      expect.anything(),
+    );
+  });
 });
 
 describe('MediaUploader.upload kind routing', () => {
