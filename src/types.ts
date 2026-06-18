@@ -401,6 +401,15 @@ export interface OutboundConfig {
    * Default: 30000.
    */
   streamMaxElementChars?: number;
+  /**
+   * Maximum age for one streaming markdown card before the controller
+   * finalizes it and continues in a follow-up card. Feishu auto-closes
+   * streaming cards after roughly 10 minutes; rolling over before that
+   * keeps long-running agent output updateable.
+   *
+   * Set to 0 to disable age-based rollover. Default: 8 minutes.
+   */
+  streamMaxCardAgeMs?: number;
   ssrfGuard?: boolean | { allowlist?: string[] };
   /**
    * Allowlist of directories that a **local file** media `source` may be read

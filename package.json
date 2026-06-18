@@ -48,6 +48,7 @@
     "lint": "biome check .",
     "format": "biome check --write .",
     "example": "tsx",
+    "prepare": "npm run build",
     "prepublishOnly": "pnpm typecheck && pnpm test && pnpm build"
   },
   "dependencies": {

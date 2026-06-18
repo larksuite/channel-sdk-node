@@ -19,6 +19,9 @@ const INITIAL_SUMMARY = '[Generating...]';
 const SUMMARY_MAX_CHARS = 50;
 const ERROR_FOOTER = '\n\n— _(Generation interrupted)_';
 const DEFAULT_MAX_ELEMENT_CHARS = 30000;
+const DEFAULT_MAX_CARD_AGE_MS = 8 * 60 * 1000;
+const CONTINUATION_FOOTER = '\n\n_↪ 输出已自动续到下一条消息_';
+const CONTINUATION_HEADER = '_↩ 接上一条消息继续输出_\n\n';
 
 const ELEMENT_ID = 'stream_md';
 
@@ -101,6 +104,10 @@ export class MarkdownStreamControllerImpl implements MarkdownStreamControllerPub
   private _messageId = '';
   private cardId = '';
   private sequence = 0;
+  private finalizedChars = 0;
+  private cardStartedAt = 0;
+  private lastSnapshotLength = 0;
+  private cardPrefix = '';
 
   private throttle: Throttle;
   private queue = new UpdateQueue();
@@ -115,6 +122,8 @@ export class MarkdownStreamControllerImpl implements MarkdownStreamControllerPub
   private rolloverMessageIds: string[] = [];
 
   private readonly maxChars: number;
+  private readonly maxCardAgeMs: number;
+  private terminalError: unknown;
 
   constructor(
     private sender: OutboundSender,
@@ -131,6 +140,7 @@ export class MarkdownStreamControllerImpl implements MarkdownStreamControllerPub
       () => this.pushContent(),
     );
     this.maxChars = cfg.streamMaxElementChars ?? DEFAULT_MAX_ELEMENT_CHARS;
+    this.maxCardAgeMs = cfg.streamMaxCardAgeMs ?? DEFAULT_MAX_CARD_AGE_MS;
   }
 
   get messageId(): string {
@@ -141,16 +151,15 @@ export class MarkdownStreamControllerImpl implements MarkdownStreamControllerPub
     if (!chunk) return;
     await this.ensureStarted();
     const merged = mergeStreamingText(this.fullAccumulated, chunk);
-    const delta = merged.slice(this.fullAccumulated.length);
     this.fullAccumulated = merged;
-    this.content += delta;
+    this.content = this.fullAccumulated.slice(this.finalizedChars);
     this.throttle.note(chunk.length);
   }
 
   async setContent(full: string): Promise<void> {
     await this.ensureStarted();
     this.fullAccumulated = full ?? '';
-    this.content = full ?? '';
+    this.content = this.fullAccumulated.slice(this.finalizedChars);
     this.throttle.note(Number.MAX_SAFE_INTEGER);
   }
 
@@ -185,6 +194,7 @@ export class MarkdownStreamControllerImpl implements MarkdownStreamControllerPub
       this.cardId,
       this.opts,
     );
+    this.cardStartedAt = Date.now();
   }
 
   private async pushContent(): Promise<void> {
@@ -196,6 +206,7 @@ export class MarkdownStreamControllerImpl implements MarkdownStreamControllerPub
         await this.pushSnapshot();
       } catch (e) {
         this.streamingFailed = true;
+        this.terminalError = e;
         this.sender.logger.warn?.('[stream] update failed', e);
       }
     });
@@ -210,8 +221,23 @@ export class MarkdownStreamControllerImpl implements MarkdownStreamControllerPub
     while (this.content.length > this.maxChars) {
       await this.rollover();
     }
-    const snapshot = this.content || '...';
+    if (this.shouldRolloverByAge()) await this.rolloverByAge();
+    while (this.content.length > this.maxChars) {
+      await this.rollover();
+    }
+    const snapshot = this.cardPrefix + (this.content || '...');
     await this.sender.updateCardElementContent(this.cardId, ELEMENT_ID, snapshot, ++this.sequence);
+    this.lastSnapshotLength = this.content.length;
+  }
+
+  private shouldRolloverByAge(): boolean {
+    return (
+      this.maxCardAgeMs > 0 &&
+      this.cardStartedAt > 0 &&
+      Date.now() - this.cardStartedAt >= this.maxCardAgeMs &&
+      this.lastSnapshotLength > 0 &&
+      this.content.length > this.lastSnapshotLength
+    );
   }
 
   /**
@@ -220,6 +246,7 @@ export class MarkdownStreamControllerImpl implements MarkdownStreamControllerPub
    * so rollover steps are serialized with regular updates.
    */
   private async rollover(): Promise<void> {
+    const oldContent = this.content;
     const chunks = splitWithCodeFences(this.content, this.maxChars);
     if (chunks.length < 2) {
       // Splitter couldn't split below the cap (single token over limit?).
@@ -257,7 +284,56 @@ export class MarkdownStreamControllerImpl implements MarkdownStreamControllerPub
     //    from 0 for the fresh element.
     this.cardId = newCardId;
     this.content = tail;
+    this.finalizedChars += Math.max(0, oldContent.length - tail.length);
     this.sequence = 0;
+    this.cardStartedAt = Date.now();
+    this.lastSnapshotLength = tail.length;
+    this.cardPrefix = '';
+    this.rolloverMessageIds.push(newMessageId);
+  }
+
+  private async rolloverByAge(): Promise<void> {
+    const head = this.content.slice(0, this.lastSnapshotLength);
+    const tail = this.content.slice(this.lastSnapshotLength);
+    const finalHead = (head || DEFAULT_EMPTY) + CONTINUATION_FOOTER;
+
+    try {
+      await this.sender.updateCardElementContent(
+        this.cardId,
+        ELEMENT_ID,
+        this.cardPrefix + finalHead,
+        ++this.sequence,
+      );
+    } catch (e) {
+      this.sender.logger.warn?.('[stream] update before rollover failed', e);
+    }
+
+    try {
+      await this.sender.finishStreamingCard(
+        this.cardId,
+        ++this.sequence,
+        truncateSummary(head || DEFAULT_EMPTY),
+      );
+    } catch (e) {
+      this.sender.logger.warn?.('[stream] finishStreamingCard before rollover failed', e);
+    }
+
+    const cardSpec = buildStreamingCard(CONTINUATION_HEADER + (tail || '...'));
+    const newCardId = await this.sender.createCardInstance(cardSpec);
+    const newMessageId = await this.sender.sendCardByReference(
+      this.to,
+      this.idType,
+      newCardId,
+      this.opts,
+    );
+
+    this.cardId = newCardId;
+    this.content = tail;
+    this.finalizedChars += this.lastSnapshotLength;
+    this.sequence = 0;
+    this.cardStartedAt = Date.now();
+    this.lastSnapshotLength = tail.length;
+    this.cardPrefix = CONTINUATION_HEADER;
     this.rolloverMessageIds.push(newMessageId);
   }
 
@@ -293,8 +369,10 @@ export class MarkdownStreamControllerImpl implements MarkdownStreamControllerPub
       );
     } catch (e) {
       // best effort — Feishu auto-closes after 10min anyway
+      this.terminalError = e;
       this.sender.logger.warn?.('[stream] finishStreamingCard failed', e);
     }
+    if (this.terminalError) throw this.terminalError;
   }
 
   private async failTerminal(_err: unknown): Promise<void> {
