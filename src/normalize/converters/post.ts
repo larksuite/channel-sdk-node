@@ -3,9 +3,9 @@ import type { ContentConverterFn, ConvertContext, PostElement } from '../context
 import { applyStyle, safeParse, unwrapLocale } from '../utils';
 
 interface PostBody {
-    title?: string;
-    content?: PostElement[][];
-    content_v2?: PostElement[][];
+  title?: string;
+  content?: PostElement[][];
+  content_v2?: PostElement[][];
 }
 
 const atMentionRe = /<at(\s+)user_id(\s*)=(\s*)"(.*?)">(.*?)<\/at>/g;
@@ -22,9 +22,7 @@ export const convertPost: ContentConverterFn = async (raw, ctx) => {
 
   // Choose source paragraphs: prefer content_v2, fallback to content.
   const sourceParagraphs =
-    (body.content_v2 && body.content_v2.length > 0)
-        ? body.content_v2
-        : (body.content ?? []);
+    body.content_v2 && body.content_v2.length > 0 ? body.content_v2 : (body.content ?? []);
 
   const resources: ResourceDescriptor[] = [];
   const lines: string[] = [];
@@ -54,33 +52,33 @@ export const convertPost: ContentConverterFn = async (raw, ctx) => {
  * Unclosed fences are treated as outside-code-block text.
  */
 function processMdText(text: string, resources: ResourceDescriptor[]): string {
-    const parts = text.split('```');
-    const total = parts.length;
-    for (let i = 0; i < parts.length; i++) {
-      // Odd-index segments are inside code blocks, UNLESS it's the last
-      // segment of an even-length split (unclosed fence).
-      let isInside = (i % 2 === 1);
-      if (isInside && total % 2 === 0 && i === total - 1) {
-          isInside = false;
-      }
-      if (!isInside) {
-          // Outside code block: apply transformations.
-          parts[i] = parts[i].replace(atMentionRe, (_match, _sp1, _sp2, _sp3, userId, name) => {
-              if (userId === 'all' || userId === 'all_members') return '@all';
-              return name ? `@${name}` : `@${userId}`;
-          });
-          // Extract image keys from ![...](key) patterns.
-          let imgMatch: RegExpExecArray | null;
-          imageKeyRe.lastIndex = 0;
-          while ((imgMatch = imageKeyRe.exec(parts[i])) !== null) {
-              if (imgMatch[2]) {
-                  resources.push({ type: 'image', fileKey: imgMatch[2] });
-              }
-          }
-      }
-      // Inside code block: preserve as-is.
+  const parts = text.split('```');
+  const total = parts.length;
+  for (let i = 0; i < parts.length; i++) {
+    // Odd-index segments are inside code blocks, UNLESS it's the last
+    // segment of an even-length split (unclosed fence).
+    let isInside = i % 2 === 1;
+    if (isInside && total % 2 === 0 && i === total - 1) {
+      isInside = false;
     }
-    return parts.join('```');
+    if (!isInside) {
+      // Outside code block: apply transformations.
+      parts[i] = parts[i].replace(atMentionRe, (_match, _sp1, _sp2, _sp3, userId, name) => {
+        if (userId === 'all' || userId === 'all_members') return '@all';
+        return name ? `@${name}` : `@${userId}`;
+      });
+      // Extract image keys from ![...](key) patterns.
+      let imgMatch: RegExpExecArray | null;
+      imageKeyRe.lastIndex = 0;
+      while ((imgMatch = imageKeyRe.exec(parts[i])) !== null) {
+        if (imgMatch[2]) {
+          resources.push({ type: 'image', fileKey: imgMatch[2] });
+        }
+      }
+    }
+    // Inside code block: preserve as-is.
+  }
+  return parts.join('```');
 }
 
 function renderElement(

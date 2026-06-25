@@ -164,11 +164,11 @@ describe('MarkdownStreamController rollover', () => {
   });
 
   test('accumulated-mode producer survives rollover (full text re-sent each chunk)', async () => {
-    // After rollover, this.content is just the tail. If the producer is
-    // accumulated-mode (each chunk is the full history), naive merge
-    // would produce garbage because next no longer starts with prev.
-    // The controller maintains fullAccumulated separately to merge
-    // correctly.
+    // Accumulated-mode producers re-send the full history each chunk via
+    // setContent (the full-replacement API). After rollover this.content
+    // is reset to the tail; the next setContent replaces it with the
+    // current full snapshot, which rolls over again — the final card must
+    // show only the trailing portion, never duplicated head bytes.
     const { sender, calls } = makeStubSender({ cap: 100 });
     const ctrl = new MarkdownStreamControllerImpl(sender, 'oc_x', 'chat_id', {});
 
@@ -176,10 +176,10 @@ describe('MarkdownStreamController rollover', () => {
       const a = 'a'.repeat(60);
       const b = 'b'.repeat(60);
       const c2 = 'c'.repeat(60);
-      // Simulate accumulated mode — each chunk includes everything so far.
-      await c.append(a);
-      await c.append(a + '\n' + b); // accumulated + new line
-      await c.append(a + '\n' + b + '\n' + c2); // accumulated + another
+      // Accumulated mode — each chunk is the full content so far.
+      await c.setContent(a);
+      await c.setContent(a + '\n' + b);
+      await c.setContent(a + '\n' + b + '\n' + c2);
     });
 
     // At least one rollover happened; final card's last update should
