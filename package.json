@@ -1,6 +1,6 @@
 {
   "name": "@larksuite/channel",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Channel SDK — let agents and external services integrate with the Feishu/Lark messaging system: reliable inbound events, message normalization, streaming replies, media upload, card interactions.",
   "keywords": [
     "feishu",
