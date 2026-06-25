@@ -93,7 +93,7 @@ export class OutboundSender {
         idType,
         msgType: 'post',
         content: post,
-        replyTo: i === 0 ? opts.replyTo : undefined,
+        replyTo: replyTargetForChunk(i, opts, ids),
         replyInThread: opts.replyInThread,
       });
       ids.push(id);
@@ -117,7 +117,7 @@ export class OutboundSender {
         idType,
         msgType: 'text',
         content: { text: chunks[i] },
-        replyTo: i === 0 ? opts.replyTo : undefined,
+        replyTo: replyTargetForChunk(i, opts, ids),
         replyInThread: opts.replyInThread,
       });
       ids.push(id);
@@ -489,6 +489,21 @@ export class OutboundSender {
       chunkIds: ids.length > 1 ? ids : undefined,
     };
   }
+}
+
+/**
+ * Pick the reply target for chunk `i` of a split message.
+ *
+ * The first chunk uses the caller's `replyTo` verbatim. Continuation chunks
+ * chain off the previous chunk's id so a long reply stays in one thread / reply
+ * line instead of breaking out as top-level messages (issue #190) — but only
+ * when the send is "anchored" (a reply target or a thread). A plain fresh send
+ * keeps its continuation chunks as independent top-level messages.
+ */
+function replyTargetForChunk(i: number, opts: SendOptions, ids: string[]): string | undefined {
+  if (i === 0) return opts.replyTo;
+  const anchored = opts.replyTo != null || opts.replyInThread === true;
+  return anchored ? ids[i - 1] : undefined;
 }
 
 function splitPlain(text: string, limit: number): string[] {

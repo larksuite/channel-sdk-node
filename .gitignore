@@ -7,3 +7,5 @@ coverage/
 .claude/
 .env
 .env.local
+.harness/
+.harness-sandbox-result.json
