@@ -9,4 +9,3 @@ export { retry } from './retry';
 export type { ReceiveIdType } from './routing';
 export { detectReceiveIdType } from './routing';
 export { OutboundSender } from './sender';
-export { mergeStreamingText } from './streaming/merge-text';

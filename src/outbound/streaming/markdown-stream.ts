@@ -7,7 +7,6 @@ import type {
 import { splitWithCodeFences } from '../markdown/splitter';
 import type { ReceiveIdType } from '../routing';
 import type { OutboundSender } from '../sender';
-import { mergeStreamingText } from './merge-text';
 import { Throttle } from './throttle';
 import { UpdateQueue } from './update-queue';
 
@@ -91,13 +90,6 @@ function buildStreamingCard(initialText: string): object {
 export class MarkdownStreamControllerImpl implements MarkdownStreamControllerPublic {
   /** Content of the current (latest) card's markdown element. */
   private content = '';
-  /**
-   * Full upstream-side accumulated text. Kept separate from `content` so
-   * that accumulated-mode producers (where each `append` chunk contains
-   * the full history) merge correctly even after rollover has discarded
-   * the head from `content`.
-   */
-  private fullAccumulated = '';
   private _messageId = '';
   private cardId = '';
   private sequence = 0;
@@ -140,16 +132,16 @@ export class MarkdownStreamControllerImpl implements MarkdownStreamControllerPub
   async append(chunk: string): Promise<void> {
     if (!chunk) return;
     await this.ensureStarted();
-    const merged = mergeStreamingText(this.fullAccumulated, chunk);
-    const delta = merged.slice(this.fullAccumulated.length);
-    this.fullAccumulated = merged;
-    this.content += delta;
+    // `chunk` is a delta: append it verbatim. Accumulated/full-content
+    // producers must use setContent — auto-detecting the two modes is
+    // ambiguous and silently drops legitimate repeated boundary chars
+    // (e.g. '共 3' + '3 条' must render '共 33 条', not '共 3 条').
+    this.content += chunk;
     this.throttle.note(chunk.length);
   }
 
   async setContent(full: string): Promise<void> {
     await this.ensureStarted();
-    this.fullAccumulated = full ?? '';
     this.content = full ?? '';
     this.throttle.note(Number.MAX_SAFE_INTEGER);
   }
