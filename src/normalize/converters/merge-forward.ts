@@ -1,7 +1,15 @@
+import type { ResourceDescriptor } from '../../types';
 import type { ApiMessageItem, ContentConverterFn, ConvertContext } from '../context';
 import { formatRFC3339Beijing, indentLines } from '../utils';
 
 const MAX_ITEMS = 50;
+
+// Internal render result: a sub-item's rendered text plus the resources it (and
+// any descendants) carry, each already stamped with its owning message id.
+interface RenderedItem {
+  content: string;
+  resources: ResourceDescriptor[];
+}
 
 export const convertMergeForward: ContentConverterFn = async (_raw, ctx) => {
   const { messageId, fetchSubMessages, dispatch } = ctx;
@@ -41,8 +49,8 @@ export const convertMergeForward: ContentConverterFn = async (_raw, ctx) => {
   }
 
   const childrenMap = buildChildrenMap(capped, messageId);
-  const content = await formatSubTree(messageId, childrenMap, ctx, truncated);
-  return { content, resources: [] };
+  const { content, resources } = await formatSubTree(messageId, childrenMap, ctx, truncated);
+  return { content, resources };
 };
 
 function buildChildrenMap(items: ApiMessageItem[], rootId: string): Map<string, ApiMessageItem[]> {
@@ -72,31 +80,35 @@ async function formatSubTree(
   map: Map<string, ApiMessageItem[]>,
   ctx: ConvertContext,
   truncated = false,
-): Promise<string> {
+): Promise<RenderedItem> {
   const children = map.get(parentId);
-  if (!children || children.length === 0) return '<forwarded_messages/>';
+  if (!children || children.length === 0) {
+    return { content: '<forwarded_messages/>', resources: [] };
+  }
 
   const parts: string[] = [];
+  const resources: ResourceDescriptor[] = [];
   for (const item of children) {
     try {
       const sub = await renderItem(item, map, ctx);
-      if (sub) parts.push(sub);
+      if (sub.content) parts.push(sub.content);
+      resources.push(...sub.resources);
     } catch {
       // skip bad item
     }
   }
 
-  if (parts.length === 0) return '<forwarded_messages/>';
+  if (parts.length === 0) return { content: '<forwarded_messages/>', resources };
   const body = parts.join('\n');
   const footer = truncated ? '\n... (truncated)' : '';
-  return `<forwarded_messages>\n${body}${footer}\n</forwarded_messages>`;
+  return { content: `<forwarded_messages>\n${body}${footer}\n</forwarded_messages>`, resources };
 }
 
 async function renderItem(
   item: ApiMessageItem,
   map: Map<string, ApiMessageItem[]>,
   ctx: ConvertContext,
-): Promise<string> {
+): Promise<RenderedItem> {
   const msgType = item.msg_type ?? 'text';
   const senderId = item.sender?.id ?? 'unknown';
   const createMs = parseInt(String(item.create_time ?? '0'), 10);
@@ -104,10 +116,18 @@ async function renderItem(
   const displayName = ctx.resolveUserName?.(senderId) ?? senderId;
 
   let content: string;
+  let resources: ResourceDescriptor[] = [];
   if (msgType === 'merge_forward') {
-    // Nested forward — recurse locally without another API call.
+    // Nested forward — recurse locally without another API call. Descendant
+    // resources already carry their own (innermost) sourceMessageId.
     const nestedId = item.message_id;
-    content = nestedId ? await formatSubTree(nestedId, map, ctx) : '<forwarded_messages/>';
+    if (nestedId) {
+      const sub = await formatSubTree(nestedId, map, ctx);
+      content = sub.content;
+      resources = sub.resources;
+    } else {
+      content = '<forwarded_messages/>';
+    }
   } else {
     const rawContent = item.body?.content ?? '{}';
     if (!ctx.dispatch) {
@@ -115,9 +135,14 @@ async function renderItem(
     } else {
       const r = await ctx.dispatch(rawContent, msgType, ctx);
       content = r.content;
+      // Bubble the sub-message's own resources up so the caller can download
+      // them. Feishu's messageResource.get accepts the top-level merge_forward
+      // container id (= NormalizedMessage.messageId) for these — verified
+      // against a real forward — so no per-resource owning id is needed.
+      resources = r.resources;
     }
   }
 
   const indented = indentLines(content, '    ');
-  return `[${timestamp}] ${displayName}:\n${indented}`;
+  return { content: `[${timestamp}] ${displayName}:\n${indented}`, resources };
 }

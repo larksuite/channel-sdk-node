@@ -186,7 +186,7 @@ type RejectReason = 'group_not_allowed' | 'sender_not_allowed' | 'no_mention' | 
 | `addReaction` | `addReaction(messageId, emojiType): Promise<string>` | Returns `reaction_id` |
 | `removeReaction` | `removeReaction(messageId, reactionId): Promise<void>` | Remove by id |
 | `removeReactionByEmoji` | `removeReactionByEmoji(messageId, emojiType): Promise<boolean>` | Remove the bot's own |
-| `downloadResource` | `downloadResource(messageId, fileKey, type): Promise<Buffer>` | Download media from a received message; `type`: `'image'` / `'file'` |
+| `downloadResource` | `downloadResource(messageId, fileKey, type): Promise<Buffer>` | Download media from a received message; `type`: `'image'` / `'file'`. Resources forwarded in a `merge_forward` use the same top-level `msg.messageId` |
 | `getChatInfo` | `getChatInfo(chatId): Promise<ChatInfo>` | Chat info |
 | `getChatMode` | `getChatMode(chatId): Promise<'p2p' \| 'group' \| 'topic'>` | Chat mode |
 | `fetchMessage` | `fetchMessage(messageId): Promise<NormalizedMessage \| undefined>` | Fetch + normalize a message |

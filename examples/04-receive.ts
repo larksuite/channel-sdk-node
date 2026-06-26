@@ -34,7 +34,10 @@ async function main() {
         log('  ↳ quoted:', quoted?.content?.slice(0, 120));
       }
 
-      // Has an image/file: download the first resource
+      // Has an image/file: download the first resource. Resources forwarded
+      // inside a merge_forward sub-message also bubble up here and download
+      // with the same top-level `msg.messageId` (the merge_forward container id
+      // is the owning id Feishu's messageResource.get expects).
       const res = msg.resources[0];
       if (res) {
         const buf = await channel.downloadResource(
