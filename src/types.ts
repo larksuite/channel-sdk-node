@@ -112,10 +112,36 @@ export interface CardStreamController {
 // Events
 // ─────────────────────────────────────────────────────────────
 
+/**
+ * Response a `cardAction` handler may return to give the clicking user
+ * native, immediate feedback (a toast, or an in-place card update). When a
+ * handler returns one, the SDK passes it back to Feishu/Lark as the callback
+ * response for that button click / form submit. Returning `undefined` (or
+ * nothing) means "no immediate response" — the original, pre-existing
+ * behavior.
+ *
+ * The shape is deliberately loose (passed through verbatim, not validated)
+ * because Feishu's card-callback schema is broad and evolves. Common shapes:
+ *
+ *   // toast
+ *   { toast: { type: 'success' | 'info' | 'error' | 'warning' | 'loading',
+ *              content: string, i18n?: Record<string, string> } }
+ *
+ *   // update the card in place
+ *   { card: { type: 'raw', data: { ... } } }
+ *
+ * Two caveats: the returned object is sent to Feishu as-is, so do **not** put
+ * internal secrets / PII in it; and it must be JSON-serializable (cyclic
+ * references / BigInt will throw when the response is encoded).
+ */
+export type CardActionResponse = Record<string, unknown>;
+
 export interface EventMap {
   message: (msg: NormalizedMessage) => void | Promise<void>;
   reject: (evt: RejectEvent) => void;
-  cardAction: (evt: CardActionEvent) => void | Promise<void>;
+  cardAction: (
+    evt: CardActionEvent,
+  ) => void | CardActionResponse | Promise<void | CardActionResponse>;
   reaction: (evt: ReactionEvent) => void;
   botAdded: (evt: BotAddedEvent) => void;
   comment: (evt: CommentEvent) => void | Promise<void>;

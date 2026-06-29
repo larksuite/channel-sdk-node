@@ -128,25 +128,30 @@ export class SafetyPipeline {
 
   // ─── tier 2: dedup + lock + queue for cardAction & comment ─────
 
-  async pushAction(
+  async pushAction<T>(
     eventId: string,
     queueScope: string,
-    handler: () => Promise<void>,
-  ): Promise<void> {
+    handler: () => Promise<T>,
+  ): Promise<T | undefined> {
     if (await this.seenCache.has(eventId)) {
       this.logger.debug?.(`safety: drop duplicate action ${eventId}`);
-      return;
+      return undefined;
     }
     if (!this.lock.acquire(eventId)) {
       this.logger.debug?.(`safety: drop in-flight action ${eventId}`);
-      return;
+      return undefined;
     }
 
-    const task = async () => {
+    // The handler's return value is propagated back out so card-action
+    // callback responses (e.g. a toast) can reach Feishu. A throwing handler
+    // is logged and yields `undefined` (no response) — the dedup mark and
+    // lock release in `finally` run regardless.
+    const task = async (): Promise<T | undefined> => {
       try {
-        await handler();
+        return await handler();
       } catch (e) {
         this.logger.error?.(`safety: action handler threw`, e);
+        return undefined;
       } finally {
         try {
           await this.seenCache.add(eventId);
@@ -158,10 +163,9 @@ export class SafetyPipeline {
     };
 
     if (this.queueEnabled) {
-      await this.manager.run(queueScope, task);
-    } else {
-      await task();
+      return this.manager.run(queueScope, task);
     }
+    return task();
   }
 
   // ─── tier 3: dedup only (reactions) ────────────────────

@@ -58,7 +58,12 @@ async function main() {
         { replyTo: msg.messageId },
       );
     },
-    cardAction: (e) => ok('cardAction', { tag: e.action.tag, value: e.action.value, formValue: e.action.formValue }),
+    cardAction: (e) => {
+      ok('cardAction', { tag: e.action.tag, value: e.action.value, formValue: e.action.formValue });
+      // Optionally return a callback response for native immediate feedback
+      // (a toast here); returning nothing means "no response".
+      return { toast: { type: 'success', content: '已收到' } };
+    },
     reaction: (e) => ok('reaction', e.action, e.emojiType, 'on', e.messageId),
     botAdded: (e) => ok('botAdded', 'chat', e.chatId, 'by', e.operator.openId),
     comment: (e) => ok('comment', { doc: e.fileToken, type: e.fileType, commentId: e.commentId, mentionedBot: e.mentionedBot }),

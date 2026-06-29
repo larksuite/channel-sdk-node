@@ -133,7 +133,7 @@ several; returns an unsubscribe function.
 | Event | Payload | When |
 |---|---|---|
 | `message` | `NormalizedMessage` | Inbound message (after policy / safety / batching) |
-| `cardAction` | `CardActionEvent` | Card button / form submit |
+| `cardAction` | `CardActionEvent` | Card button / form submit (handler may **return** a `CardActionResponse` — see below) |
 | `reaction` | `ReactionEvent` | Message reaction add/remove |
 | `botAdded` | `BotAddedEvent` | Bot added to a chat |
 | `comment` | `CommentEvent` | Cloud-doc comment @-mentioning the bot |
@@ -173,6 +173,32 @@ interface CommentEvent { fileToken: string; fileType: string; commentId: string;
 interface RejectEvent { messageId: string; chatId: string; senderId: string; reason: RejectReason; }
 type RejectReason = 'group_not_allowed' | 'sender_not_allowed' | 'no_mention' | 'dm_disabled' | 'mention_all_blocked';
 ```
+
+#### Card action callback responses
+
+A `cardAction` handler may **return** a `CardActionResponse` to give the
+clicking user native, immediate feedback — most commonly a toast — without
+having to update the whole card:
+
+```ts
+channel.on('cardAction', async (evt) => {
+  await handleAction(evt);
+  return { toast: { type: 'success', content: 'Submitted' } };
+  // or update the card in place: { card: { type: 'raw', data: { ... } } }
+});
+```
+
+The returned object is passed back to Feishu/Lark verbatim as the callback
+response for that click. Returning nothing (`undefined`) means "no immediate
+response" — the original behavior, so existing handlers keep working unchanged.
+
+Notes:
+- The response is sent **synchronously**, and card actions run serially per
+  chat (after any in-flight work for that chat). A slow handler can therefore
+  delay the response past Feishu's callback timeout — for heavy work, prefer
+  detaching it and reflecting progress via a card update.
+- The object is sent to Feishu as-is: do **not** include internal secrets /
+  PII, and make sure it is JSON-serializable.
 
 ### Outbound methods
 
