@@ -348,6 +348,96 @@ describe('card.action dedup key includes button identity', () => {
   });
 });
 
+describe('cardAction handler return value flows back out of the dispatcher', () => {
+  // The dispatcher's `card.action.trigger` handler must return whatever the
+  // user's cardAction handler returns, so the underlying node-sdk WS adapter
+  // can encode it as the card callback response payload (toast / inline card
+  // update). Returning undefined => no response payload (legacy behavior).
+
+  function buildRawCardAction(value: unknown, messageId: string): unknown {
+    return {
+      schema: '2.0',
+      event_type: 'card.action.trigger',
+      context: {
+        open_message_id: messageId,
+        open_chat_id: 'oc_test',
+      },
+      operator: { open_id: 'ou_alice' },
+      action: { tag: 'button', value },
+    };
+  }
+
+  // Invoke the dispatcher handler directly AND surface its return value.
+  // (The dedup-focused tests above intentionally ignore the return value; here
+  // the return value is the contract under test.)
+  async function dispatchRawAndReturn(ch: any, raw: unknown): Promise<unknown> {
+    return ch.dispatcher.handles.get('card.action.trigger')(raw);
+  }
+
+  test('handler returning a response object is returned verbatim by the dispatcher', async () => {
+    const ch = createChannel();
+    (ch as any).registerDispatcherHandlers();
+
+    const response = { toast: { type: 'success', content: 'ok' } };
+    ch.on('cardAction', () => response);
+
+    const ret = await dispatchRawAndReturn(ch, buildRawCardAction({ cmd: 'A' }, 'om_ret_verbatim'));
+
+    expect(ret).toEqual({ toast: { type: 'success', content: 'ok' } });
+  });
+
+  test('handler returning undefined makes the dispatcher return undefined', async () => {
+    const ch = createChannel();
+    (ch as any).registerDispatcherHandlers();
+
+    ch.on('cardAction', () => {
+      /* no return — legacy void handler */
+    });
+
+    // Fresh messageId so the module-level internalCache can't dedup-drop this
+    // dispatch on account of an earlier test case.
+    const ret = await dispatchRawAndReturn(
+      ch,
+      buildRawCardAction({ cmd: 'A' }, 'om_ret_undefined'),
+    );
+
+    expect(ret).toBeUndefined();
+  });
+
+  test('no registered cardAction handler makes the dispatcher return undefined (no throw)', async () => {
+    const ch = createChannel();
+    (ch as any).registerDispatcherHandlers();
+
+    // No ch.on('cardAction', ...) at all.
+    const ret = await dispatchRawAndReturn(
+      ch,
+      buildRawCardAction({ cmd: 'A' }, 'om_ret_no_handler'),
+    );
+
+    expect(ret).toBeUndefined();
+  });
+
+  test('dedup re-delivery: handler fires once, second dispatch returns undefined', async () => {
+    const ch = createChannel();
+    (ch as any).registerDispatcherHandlers();
+
+    let calls = 0;
+    ch.on('cardAction', () => {
+      calls++;
+      return { toast: { type: 'success', content: 'ok' } };
+    });
+
+    const first = await dispatchRawAndReturn(ch, buildRawCardAction({ cmd: 'A' }, 'om_ret_dedup'));
+    const second = await dispatchRawAndReturn(ch, buildRawCardAction({ cmd: 'A' }, 'om_ret_dedup'));
+
+    expect(calls).toBe(1);
+    expect(first).toEqual({ toast: { type: 'success', content: 'ok' } });
+    // The deduped re-delivery must not re-emit a response — matches Feishu's
+    // retry semantics (the first delivery already produced the response).
+    expect(second).toBeUndefined();
+  });
+});
+
 describe('comment dedup key includes replyId', () => {
   // Regression: previously the dedup key was
   //   comment:${fileToken}:${commentId}

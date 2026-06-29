@@ -859,14 +859,18 @@ export class LarkChannel {
       // of the same click still hashes to the same key.
       'card.action.trigger': async (raw: unknown) => {
         const evt = normalizeCardAction(raw as never, { includeRaw });
-        if (!evt) return;
+        if (!evt) return undefined;
         const actionId = cardActionId(evt.action);
-        await this.safety.pushAction(
+        // Return the handler's value so a card-action callback response
+        // (e.g. a toast) flows back through the dispatcher to Feishu. A
+        // missing handler or a deduped / in-flight drop yields `undefined`,
+        // which the transport reads as "no response".
+        return this.safety.pushAction(
           `card:${evt.messageId}:${evt.operator.openId}:${actionId}`,
           evt.chatId,
           async () => {
             const h = this.handlers.cardAction;
-            if (h) await h(evt);
+            return h ? h(evt) : undefined;
           },
         );
       },

@@ -31,6 +31,7 @@ export type {
   BotAddedEvent,
   BotIdentity,
   CardActionEvent,
+  CardActionResponse,
   CardStreamController,
   CardStreamProducer,
   ChatInfo,

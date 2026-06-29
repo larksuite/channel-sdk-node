@@ -118,7 +118,7 @@ const channel = createLarkChannel({ appId: client_id, appSecret: client_secret }
 | 事件 | 回调参数 | 触发时机 |
 |---|---|---|
 | `message` | `NormalizedMessage` | 收到（已过策略/安全/批合并的）消息 |
-| `cardAction` | `CardActionEvent` | 卡片按钮 / 表单提交 |
+| `cardAction` | `CardActionEvent` | 卡片按钮 / 表单提交（handler 可**返回** `CardActionResponse`，见下） |
 | `reaction` | `ReactionEvent` | 消息表情增删 |
 | `botAdded` | `BotAddedEvent` | bot 被加入群 |
 | `comment` | `CommentEvent` | 云文档评论 @bot |
@@ -158,6 +158,28 @@ interface CommentEvent { fileToken: string; fileType: string; commentId: string;
 interface RejectEvent { messageId: string; chatId: string; senderId: string; reason: RejectReason; }
 type RejectReason = 'group_not_allowed' | 'sender_not_allowed' | 'no_mention' | 'dm_disabled' | 'mention_all_blocked';
 ```
+
+#### 卡片回调响应
+
+`cardAction` handler 可**返回**一个 `CardActionResponse`，给点击用户原生的即时反馈
+——最常见是 toast，无需更新整张卡片：
+
+```ts
+channel.on('cardAction', async (evt) => {
+  await handleAction(evt);
+  return { toast: { type: 'success', content: '已提交' } };
+  // 或就地更新卡片：{ card: { type: 'raw', data: { ... } } }
+});
+```
+
+返回的对象会原样回传给 Feishu/Lark 作为该次点击的回调响应。不返回（`undefined`）
+即「无即时响应」——与旧行为一致，现有 handler 无需改动。
+
+注意：
+- 响应是**同步**回传，且卡片动作按 chat **串行**执行（排在该 chat 在途工作之后）。
+  耗时 handler 会让响应延迟、甚至超过 Feishu 回调超时——重活仍建议 detach 到后台、
+  用卡片更新反映进度。
+- 对象会原样发给 Feishu：**勿**放内部 secret / PII，且须可被 JSON 序列化。
 
 ### 出站方法
 
