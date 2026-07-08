@@ -21,6 +21,19 @@ export interface NormalizedMessage {
   chatMode?: 'p2p' | 'group' | 'topic';
   senderId: string;
   senderName?: string;
+  /**
+   * Sender kind, passed through from the raw event's `sender.sender_type`
+   * (`'user' | 'bot' | 'system' | 'anonymous'`; other values are possible, so
+   * the type is a plain string). `undefined` when the event omits it — the kind
+   * cannot be inferred, so treat `undefined` as "unknown", not "not a bot".
+   */
+  senderType?: string;
+  /**
+   * Convenience derived from {@link senderType}: `true` when it is `'bot'`,
+   * `false` for any other present kind, `undefined` when `senderType` is absent
+   * (so a missing signal is never mistaken for "not a bot").
+   */
+  senderIsBot?: boolean;
   content: string;
   rawContentType: string;
   resources: ResourceDescriptor[];
@@ -82,6 +95,13 @@ export interface SendOptions {
   replyTo?: string;
   replyInThread?: boolean;
   mentions?: MentionInfo[];
+  /**
+   * Rewrite plaintext `@<name>` tokens in a `{ text }` / `{ markdown }` body
+   * into real `<at>` mentions, resolving each name against the target chat's
+   * member roster. Unknown or ambiguous names are left as plaintext — an
+   * unresolved `@xxx` is never turned into a mention. Off by default.
+   */
+  resolveMentionsInText?: boolean;
 }
 
 export interface SendResult {
@@ -159,13 +179,18 @@ export type EventName = keyof EventMap;
  * Internal defenses (duplicate dedup, stale/expired timestamps, in-flight
  * processing lock) silently drop their targets — they are not reject
  * reasons, because the caller cannot act on them meaningfully.
+ *
+ * `bot_loop` is emitted only by the opt-in {@link PolicyConfig.botLoopGuard}
+ * when configured with `onTrip: 'reject'` (the default `'drop'` mode drops
+ * silently, like the internal defenses).
  */
 export type RejectReason =
   | 'group_not_allowed'
   | 'sender_not_allowed'
   | 'no_mention'
   | 'dm_disabled'
-  | 'mention_all_blocked';
+  | 'mention_all_blocked'
+  | 'bot_loop';
 
 export interface RejectEvent {
   messageId: string;
@@ -327,6 +352,26 @@ export interface LarkChannelOptions {
   resolveChatMode?: boolean;
 
   /**
+   * Populate {@link NormalizedMessage.senderName} on inbound messages by
+   * resolving the sender's display name from the chat's member roster (warmed
+   * via a cached `getChatMembers`). Costs one cached members lookup per chat
+   * (best-effort; degrades to `undefined` on failure). Off by default to avoid
+   * the extra API call for callers that don't need names.
+   */
+  resolveSenderNames?: boolean;
+
+  /**
+   * Override how {@link LarkChannel.getChatMembers} obtains a chat's roster.
+   * When provided and it returns a member array, that array is used and the
+   * Feishu `im.v1.chatMembers.get` call is skipped (useful when the app already
+   * has its own directory / cache). Return `undefined` to fall back to the API.
+   * Results still flow through the internal roster cache.
+   */
+  resolveChatMembers?: (
+    chatId: string,
+  ) => ChatMember[] | undefined | Promise<ChatMember[] | undefined>;
+
+  /**
    * App-level keepalive watchdog (defense-in-depth above the SDK's internal
    * ping). When enabled, an independent timer probes the connection and
    * force-reconnects the WebSocket if it looks stuck while the network is
@@ -402,11 +447,52 @@ export interface SafetyConfig {
 }
 
 export interface PolicyConfig {
+  /**
+   * Chat allowlist for group messages — entries are **chat ids** (`oc_…`).
+   * When non-empty, only listed chats are processed. Do **not** put an app id
+   * (`cli_…`) here: it is not a chat id, so it silently matches nothing (the
+   * SDK logs a warning if it sees one). This doubles as a lightweight
+   * "allowFrom" for bot-at-bot: pair it with `requireMention` to scope the bot
+   * to specific rooms without needing every sender's open_id.
+   */
   groupAllowlist?: string[];
   dmMode?: 'open' | 'allowlist' | 'pair' | 'disabled';
+  /**
+   * Sender allowlist for DMs when `dmMode: 'allowlist'` — entries are **sender
+   * ids** matching {@link NormalizedMessage.senderId}: an `open_id` (`ou_…`),
+   * `user_id`, or `union_id`. Do **not** put an app id (`cli_…`) here: a real
+   * sender is never a `cli_` id, so a `cli_` entry grants access to no one (the
+   * SDK logs a warning if it sees one).
+   */
   dmAllowlist?: string[];
   requireMention?: boolean;
   respondToMentionAll?: boolean;
+  /**
+   * Opt-in heuristic guard against two bots @-ing each other in an endless
+   * ping-pong. Off by default. See {@link BotLoopGuardConfig} and the README:
+   * the default `onTrip: 'drop'` silently mutes the bot, so prefer `'reject'`
+   * when the app needs to know, and tune `windowMs` / `maxBotMentions` to the
+   * expected collaboration tempo.
+   */
+  botLoopGuard?: BotLoopGuardConfig;
+}
+
+/** Configuration for the opt-in bot ping-pong guard ({@link PolicyConfig.botLoopGuard}). */
+export interface BotLoopGuardConfig {
+  /** Enable the guard. Default `false`. */
+  enabled?: boolean;
+  /** Sliding-window width in ms. Default `60000`. */
+  windowMs?: number;
+  /** Trip once this many "another bot @'d me" messages fall inside the window. Default `5`. */
+  maxBotMentions?: number;
+  /** Count per chat, or per (chat, sender bot). Default `'chat'`. */
+  scope?: 'chat' | 'chat+sender';
+  /**
+   * On trip: `'drop'` silently drops the message (debug log + one warn on the
+   * first trip), `'reject'` emits a `reject` event with `reason: 'bot_loop'`.
+   * Default `'drop'`.
+   */
+  onTrip?: 'drop' | 'reject';
 }
 
 export interface OutboundConfig {
@@ -456,6 +542,22 @@ export interface ChatInfo {
   chatType: 'p2p' | 'group';
   ownerId?: string;
   memberCount?: number;
+}
+
+/** One member from {@link LarkChannel.getChatMembers}. */
+export interface ChatMember {
+  /** Member id in the requested {@link idType} (default `open_id`). */
+  id: string;
+  idType?: IdType;
+  name?: string;
+  tenantKey?: string;
+  /**
+   * Whether the member is a bot. Members returned by `getChatMembers` are
+   * always **users** — Feishu's chat-members API filters bots out — so this is
+   * `false`/`undefined` there. It exists for roster entries harvested from
+   * other sources (e.g. inbound mentions) that can carry bots.
+   */
+  isBot?: boolean;
 }
 
 export type IdType = 'open_id' | 'user_id' | 'union_id';

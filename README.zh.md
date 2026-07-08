@@ -86,6 +86,8 @@ const channel = createLarkChannel({ appId: client_id, appSecret: client_secret }
 | `safety` | `SafetyConfig` | — | 去重 / 过期 / 按 chat 串行 / 批合并 |
 | `outbound` | `OutboundConfig` | — | 出站行为（分片、流式、SSRF、重试） |
 | `resolveChatMode` | `boolean` | `false` | 填充 `NormalizedMessage.chatMode`（每 chat 一次 cached `chat.get`） |
+| `resolveSenderNames` | `boolean` | `false` | 从群成员 roster 填充 `NormalizedMessage.senderName`（每 chat 一次 cached `getChatMembers`） |
+| `resolveChatMembers` | `(chatId) => ChatMember[] \| undefined \| Promise<…>` | — | 覆写 `getChatMembers` 的 roster 来源（返回 `undefined` 回落 API） |
 | `keepalive` | `{ enabled; onUnrecoverable?; intervalMs? }` | — | 连接保活看门狗（仅 WS） |
 | `respectProxyEnv` | `boolean` | `false` | 读 `HTTPS_PROXY` / `HTTP_PROXY`，WS + REST 都走代理 |
 | `httpTimeoutMs` | `number` | — | REST 调用超时 |
@@ -99,7 +101,7 @@ const channel = createLarkChannel({ appId: client_id, appSecret: client_secret }
 | `source` | `string` | — | User-Agent 标记 |
 | `includeRawEvent` | `boolean` | `false` | 每个事件附带原始载荷 `evt.raw` |
 
-`PolicyConfig`：`requireMention` · `dmMode`（`'open' \| 'allowlist' \| 'pair' \| 'disabled'`）· `dmAllowlist` · `groupAllowlist` · `respondToMentionAll`。
+`PolicyConfig`：`requireMention` · `dmMode`（`'open' \| 'allowlist' \| 'pair' \| 'disabled'`）· `dmAllowlist` · `groupAllowlist` · `respondToMentionAll` · `botLoopGuard`（见 [Bot-at-bot](#bot-at-bot)）。`dmAllowlist` 填**发送方 id**（`ou_…` / user_id / union_id），`groupAllowlist` 填**群 id**（`oc_…`）——应用 id（`cli_…`）两者都不属于，填了会告警。
 
 `SafetyConfig`：`dedup`（`ttl`/`maxEntries`/`sweepIntervalMs`）· `chatQueue`（`enabled`、`mergeWhileBusy`）· `batch.text` / `batch.media` · `staleMessageWindowMs`。
 
@@ -133,7 +135,9 @@ interface NormalizedMessage {
   chatType: 'p2p' | 'group';
   chatMode?: 'p2p' | 'group' | 'topic'; // 需 resolveChatMode
   senderId: string;
-  senderName?: string;
+  senderName?: string;      // 需 resolveSenderNames
+  senderType?: string;      // 'user' | 'bot' | 'system' | 'anonymous'（透传自原始事件；缺失则 undefined）
+  senderIsBot?: boolean;    // senderType === 'bot' 时为 true；senderType 缺失时为 undefined
   content: string;          // 归一化后的可读内容
   rawContentType: string;   // 原始 msg_type
   resources: ResourceDescriptor[];
@@ -156,7 +160,7 @@ interface ReactionEvent { messageId: string; operator: { openId: string; userId?
 interface BotAddedEvent { chatId: string; operator: { openId: string; userId?: string }; botName?: string; external?: boolean; }
 interface CommentEvent { fileToken: string; fileType: string; commentId: string; replyId?: string; operator: { openId: string; userId?: string; unionId?: string }; mentionedBot: boolean; timestamp: number; }
 interface RejectEvent { messageId: string; chatId: string; senderId: string; reason: RejectReason; }
-type RejectReason = 'group_not_allowed' | 'sender_not_allowed' | 'no_mention' | 'dm_disabled' | 'mention_all_blocked';
+type RejectReason = 'group_not_allowed' | 'sender_not_allowed' | 'no_mention' | 'dm_disabled' | 'mention_all_blocked' | 'bot_loop';
 ```
 
 #### 卡片回调响应
@@ -186,6 +190,7 @@ channel.on('cardAction', async (evt) => {
 | 方法 | 签名 | 说明 |
 |---|---|---|
 | `send` | `send(to: string, input: SendInput, opts?: SendOptions): Promise<SendResult>` | `to` 支持 open_id / chat_id / user_id（自动识别） |
+| `reply` | `reply(msg, input: SendInput, opts?: SendOptions): Promise<SendResult>` | 回复收到的消息——默认 `replyTo` 指向它、原本在话题内则留话题内（[Bot-at-bot](#bot-at-bot)） |
 | `stream` | `stream(to, input: StreamInput, opts?): Promise<SendResult>` | 流式回复 |
 | `updateCard` | `updateCard(messageId, card): Promise<void>` | 整卡更新 |
 | `editMessage` | `editMessage(messageId, text): Promise<void>` | 编辑 text/post |
@@ -196,6 +201,9 @@ channel.on('cardAction', async (evt) => {
 | `downloadResource` | `downloadResource(messageId, fileKey, type): Promise<Buffer>` | 下载**收到的消息**里的媒体；`type`: `'image'` / `'file'` |
 | `getChatInfo` | `getChatInfo(chatId): Promise<ChatInfo>` | 群信息 |
 | `getChatMode` | `getChatMode(chatId): Promise<'p2p' \| 'group' \| 'topic'>` | 群模式 |
+| `getChatMembers` | `getChatMembers(chatId, opts?): Promise<ChatMember[]>` | 群成员（**仅用户**——飞书过滤 bot），翻页 + 缓存（[Bot-at-bot](#bot-at-bot)） |
+| `getChatBots` | `getChatBots(chatId, opts?): Promise<ChatMember[]>` | 群内**机器人**（`isBot: true`）；缓存；写入 roster，使 bot 可按名字 @（[Bot-at-bot](#bot-at-bot)） |
+| `getBotIdentity` | `getBotIdentity(): BotIdentity` | 本 bot 自身 `{ openId, name }`；`connect()` 前调用抛 `not_connected` |
 | `fetchMessage` | `fetchMessage(messageId): Promise<NormalizedMessage \| undefined>` | 取并归一化某条消息 |
 
 ```ts
@@ -209,7 +217,7 @@ type SendInput =
   | { shareChat: { chatId: string } } | { shareUser: { userId: string } }
   | { sticker: { fileKey: string } };
 
-interface SendOptions { replyTo?: string; replyInThread?: boolean; mentions?: MentionInfo[]; }
+interface SendOptions { replyTo?: string; replyInThread?: boolean; mentions?: MentionInfo[]; resolveMentionsInText?: boolean; }
 interface SendResult { messageId: string; chunkIds?: string[]; }
 
 type StreamInput =
@@ -262,6 +270,69 @@ try {
 ```
 
 > 入站 handler 内部抛的错不会冒泡到你的 `await`，而是统一进 `error` 事件。
+
+## Bot-at-bot
+
+多个 bot 在同一群里协作（互相 @ 接力）需要一些额外信号与守卫。以下能力**默认全部关闭、
+需要时才手动打开，且都是新增功能**——不开就跟现在的行为完全一样，不会影响你已有的代码。
+
+**分清谁发的。** 每条 `message` 带 `senderType`（`'user'` / `'bot'` / …）和便捷布尔
+`senderIsBot`，agent 能区分人、自己、别的 bot。用 `getBotIdentity()` 拿本 bot 身份写进
+system prompt。开 `resolveSenderNames` 从群成员 roster 填 `senderName`。
+
+**收得到别的 bot 的事件。** 除非应用开了 `im:message.group_at_msg` / `include_bot`
+权限，飞书**默认不投递**「别的 bot @ 我」的事件——且失败**静默**。平台无自查 API；若
+bot 间 @ 收不到，先确认该权限。**只 @ 一下也能唤醒 bot。** 有人 @ 了 bot 但没打任何字时，
+这条消息照常投递（不会被当成空消息丢弃）：`mentionedBot` 为 `true`、`content` 为空。
+用 `mentionedBot && !content.trim()` 就能识别这种「只戳一下 bot」的情况。
+
+**回到正确位置。** 用 `channel.reply(msg, input)` 代替手算回复目标。它回复 `msg`，并
+**跟随触发消息本来的形态**：`replyTo` 默认取 `msg.messageId`，`replyInThread` 默认取
+`Boolean(msg.threadId)`——触发消息在话题里就留在话题里，是平铺的就平铺回复。
+
+| 触发消息 | 默认 `replyInThread` | 结果 |
+|---|---|---|
+| 话题群（每条消息都归属话题） | `true` | 回复落回同一个话题 |
+| 普通群，平铺消息（不在任何话题里） | `false` | 普通引用式回复——**不会**开话题 |
+| 普通群，消息本就在某话题里 | `true` | 回复留在那个已存在的话题里 |
+
+`reply()` 只「跟随」触发消息，**不会**主动把平铺消息升级成话题。需要时用 `opts` 覆写：
+
+```ts
+channel.reply(msg, input, { replyInThread: true });   // 对平铺消息强制起一个话题
+channel.reply(msg, input, { replyInThread: false });  // 在话题里也发普通回复
+```
+
+**按名字 @。** 要 @ 回某人，要么传结构化 `mentions`（只带 `{ name }` 会用群 roster 补
+open_id），要么设 `resolveMentionsInText: true` 把 text/markdown 正文里的 `@名字` 归一。
+名字来源 = `getChatMembers`（用户）+ `getChatBots`（机器人）+ 之前入站 mention 里观察到的
+身份。因此按名字 @ 别的 bot 需先调一次 `getChatBots(chatId)` 预热，或依赖它已在群里露过面；
+否则需显式传入它的 open_id。名字**未知或被多个成员共用**时，会原样保留为纯文本、不会误 @
+——安全敏感的接力使用显式 open_id 更稳妥。
+
+**限定谁能触发 bot：按群名单，而不是逐个发送方。** 发送方的 open_id 通常事先拿不到，靠
+`dmAllowlist` 一个个列发送方并不现实。更省事的做法：用 `groupAllowlist: ['oc_…']` 只允许
+指定的群，再配 `requireMention: true` 要求 @ 才响应——这样就把 bot 圈定在这些群里，不必
+关心具体是谁发的。
+
+**打断 ping-pong 死循环。** 两 bot 可能互 @ 停不下来。默认关闭、需手动开启的
+`policy.botLoopGuard` 只统计「别的 bot @ 我」的消息（人发言会清零），在滑动窗口内超阈值即命中：
+
+```ts
+policy: {
+  botLoopGuard: {
+    enabled: true,
+    windowMs: 60_000,      // 滑动窗口 W
+    maxBotMentions: 5,     // W 内到 N 条 bot @ 即命中
+    scope: 'chat',         // 或 'chat+sender'
+    onTrip: 'reject',      // 'drop'（默认）静默停回；'reject' 触发 reject 事件
+  },
+}
+```
+
+按业务节奏调 `windowMs` / `maxBotMentions`——设太低会误伤正常高频接力。默认
+`onTrip: 'drop'` 会**静默**停回（仅首次命中打一条 warn）；需要感知被静默时用 `'reject'`
+（触发 `reason: 'bot_loop'` 的 reject 事件）。这是启发式兜底，非协议级保证。
 
 ## License
 

@@ -10,6 +10,7 @@ import type {
 
 import { ChatPipelineManager } from './chat-pipeline';
 import { SeenCache } from './dedup-cache';
+import { LoopGuard } from './loop-guard';
 import { PolicyGate } from './policy-gate';
 import { ProcessingLock } from './processing-lock';
 import { isStale } from './stale-detector';
@@ -22,6 +23,7 @@ import {
 
 export { ChatPipeline, ChatPipelineManager } from './chat-pipeline';
 export { SeenCache } from './dedup-cache';
+export { LoopGuard } from './loop-guard';
 export type { PolicyDecision } from './policy-gate';
 export { PolicyGate } from './policy-gate';
 export { ProcessingLock } from './processing-lock';
@@ -49,6 +51,7 @@ export class SafetyPipeline {
   private readonly seenCache: SeenCache;
   private readonly lock: ProcessingLock;
   private readonly policy: PolicyGate;
+  private readonly loopGuard: LoopGuard;
   private readonly manager: ChatPipelineManager;
   private readonly staleWindow: number;
   private readonly queueEnabled: boolean;
@@ -71,7 +74,8 @@ export class SafetyPipeline {
       sweepMs: opts.config?.dedup?.sweepIntervalMs,
     });
     this.lock = new ProcessingLock();
-    this.policy = new PolicyGate(opts.policy, opts.botIdentity);
+    this.policy = new PolicyGate(opts.policy, opts.botIdentity, opts.logger);
+    this.loopGuard = new LoopGuard(opts.policy?.botLoopGuard, opts.logger);
     this.manager = new ChatPipelineManager(resolveBatchConfig(opts.config));
   }
 
@@ -96,6 +100,24 @@ export class SafetyPipeline {
       } as RejectEvent);
       return;
     }
+
+    // Bot ping-pong guard (opt-in). Runs after dedup + policy so a re-delivery
+    // can't inflate the count and a policy-rejected message never counts; a
+    // human message (handled inside record) resets the window.
+    if (this.loopGuard.enabled && this.loopGuard.record(msg)) {
+      if (this.loopGuard.onTrip === 'reject') {
+        this.onReject({
+          messageId: msg.messageId,
+          chatId: msg.chatId,
+          senderId: msg.senderId,
+          reason: 'bot_loop',
+        } as RejectEvent);
+      } else {
+        this.logger.debug?.(`safety: drop bot-loop message ${msg.messageId}`);
+      }
+      return;
+    }
+
     if (!this.lock.acquire(msg.messageId)) {
       this.logger.debug?.(`safety: drop in-flight message ${msg.messageId}`);
       return;
