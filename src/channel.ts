@@ -10,6 +10,7 @@ import {
   WSClient,
 } from '@larksuiteoapi/node-sdk';
 import { HttpsProxyAgent } from 'https-proxy-agent';
+import { ChatMemberCache } from './chat-member-cache';
 import { ChatModeCache } from './chat-mode-cache';
 import { CommentSurface } from './comments';
 import {
@@ -30,17 +31,21 @@ import {
 } from './normalize';
 import { OutboundSender } from './outbound';
 import { classifyError } from './outbound/errors';
+import { resolveMentionsInText, resolveNameMentions } from './outbound/markdown/resolve-mentions';
 import { SafetyPipeline } from './safety';
 import {
   type AppInfo,
   type BotIdentity,
   type ChatInfo,
+  type ChatMember,
   type ChatSummary,
   type CreateChatOptions,
   type EventMap,
   type EventName,
+  type IdType,
   LarkChannelError,
   type LarkChannelOptions,
+  type MentionInfo,
   type NormalizedMessage,
   type PolicyConfig,
   type ResourceType,
@@ -51,6 +56,33 @@ import {
 } from './types';
 
 type Unsubscribe = () => void;
+
+/** Options for {@link LarkChannel.getChatMembers}. */
+interface GetChatMembersOptions {
+  pageSize?: number;
+  maxPages?: number;
+  idType?: IdType;
+  /** Skip the roster cache and refetch. */
+  force?: boolean;
+}
+
+/** One page of the raw `im.v1.chatMembers.get` response we consume. */
+interface RawChatMembersPage {
+  items?: Array<{
+    member_id?: string;
+    member_id_type?: string;
+    name?: string;
+    tenant_key?: string;
+  }>;
+  has_more?: boolean;
+  page_token?: string;
+}
+
+/** One item of the raw `.../members/bots` response. */
+interface RawBotItem {
+  bot_id?: string;
+  bot_name?: string;
+}
 
 export class LarkChannel {
   readonly rawClient: Client;
@@ -79,6 +111,8 @@ export class LarkChannel {
   private readonly safety: SafetyPipeline;
 
   private readonly chatModeCache = new ChatModeCache();
+
+  private readonly chatMemberCache = new ChatMemberCache();
 
   private keepaliveHandle?: KeepaliveHandle;
 
@@ -318,6 +352,24 @@ export class LarkChannel {
     return this.rawWsClient?.getConnectionStatus();
   }
 
+  /**
+   * This bot's own identity ({@link BotIdentity}) — useful to inline into an
+   * agent's system prompt ("you are @… / your open_id is …") so it can tell
+   * itself apart from other bots and decide whom to reply to. Resolved during
+   * {@link connect}; throws `LarkChannelError('not_connected')` if called
+   * before then, rather than returning `undefined`, so callers don't silently
+   * build a prompt with a missing identity.
+   */
+  getBotIdentity(): BotIdentity {
+    if (!this.botIdentity) {
+      throw new LarkChannelError(
+        'not_connected',
+        'bot identity not resolved yet — call connect() first',
+      );
+    }
+    return this.botIdentity;
+  }
+
   // ─── event subscription ────────────────────────────────
 
   on<K extends EventName>(name: K, handler: EventMap[K]): Unsubscribe;
@@ -353,11 +405,63 @@ export class LarkChannel {
   // ─── outbound ──────────────────────────────────────────
 
   async send(to: string, input: SendInput, opts?: SendOptions): Promise<SendResult> {
-    return this.sender.send(to, input, opts);
+    const resolved = this.resolveOutboundMentions(to, input, opts);
+    return this.sender.send(to, resolved.input, resolved.opts);
   }
 
   async stream(to: string, input: StreamInput, opts?: SendOptions): Promise<SendResult> {
     return this.sender.stream(to, input, opts);
+  }
+
+  /**
+   * Reply to a received message: defaults `replyTo` to `msg.messageId` and,
+   * when the trigger is inside a topic thread (`msg.threadId` present), keeps
+   * the reply in that thread — fixing the common "replied to the wrong place /
+   * fell out of the topic" mistake of computing the reply target by hand.
+   * `opts` overrides either default. Semantically a {@link send}; streaming
+   * replies still use `stream(to, input, { replyTo })`.
+   */
+  async reply(
+    msg: Pick<NormalizedMessage, 'chatId' | 'messageId' | 'threadId'>,
+    input: SendInput,
+    opts?: SendOptions,
+  ): Promise<SendResult> {
+    return this.send(msg.chatId, input, {
+      ...opts,
+      replyTo: opts?.replyTo ?? msg.messageId,
+      replyInThread: opts?.replyInThread ?? Boolean(msg.threadId),
+    });
+  }
+
+  /**
+   * Resolve "@name" into real mentions against the target chat's roster before
+   * sending: fill `openId` on name-only structured mentions, and — when
+   * `resolveMentionsInText` is set — rewrite `@name` tokens in a text/markdown
+   * body. Both no-ops when there is nothing to resolve, so the default send
+   * path is untouched.
+   */
+  private resolveOutboundMentions(
+    to: string,
+    input: SendInput,
+    opts?: SendOptions,
+  ): { input: SendInput; opts?: SendOptions } {
+    if (!opts) return { input };
+    const lookup = (name: string) => this.chatMemberCache.resolveOpenId(to, name);
+
+    let nextOpts = opts;
+    if (opts.mentions?.length) {
+      nextOpts = { ...opts, mentions: resolveNameMentions(opts.mentions, lookup) };
+    }
+
+    let nextInput = input;
+    if (opts.resolveMentionsInText) {
+      if ('text' in input)
+        nextInput = { ...input, text: resolveMentionsInText(input.text, lookup) };
+      else if ('markdown' in input)
+        nextInput = { ...input, markdown: resolveMentionsInText(input.markdown, lookup) };
+    }
+
+    return { input: nextInput, opts: nextOpts };
   }
 
   // ─── low-level ─────────────────────────────────────────
@@ -659,6 +763,129 @@ export class LarkChannel {
   }
 
   /**
+   * List a chat's members (`im.v1.chatMembers.get`), following pagination.
+   * Returns **users only** — Feishu's chat-members API filters bots out, so
+   * `isBot` is never `true` here. Use {@link getChatBots} for the bots.
+   * `pageSize` is clamped to Feishu's max of 100; `maxPages` (default 10) caps
+   * paging. Results are cached per chat and reused by `senderName` resolution
+   * and "@name → open_id"; a second call hits the cache and `force` bypasses
+   * it. A `resolveChatMembers` option, if provided, overrides the API.
+   * Throws {@link LarkChannelError} on API failure.
+   */
+  async getChatMembers(chatId: string, opts?: GetChatMembersOptions): Promise<ChatMember[]> {
+    if (!opts?.force) {
+      const cached = this.chatMemberCache.getMembers(chatId);
+      if (cached) return cached;
+    }
+    const members = await this.fetchChatMembers(chatId, opts);
+    this.chatMemberCache.setMembers(chatId, members, 'api');
+    return members;
+  }
+
+  private async fetchChatMembers(
+    chatId: string,
+    opts?: GetChatMembersOptions,
+  ): Promise<ChatMember[]> {
+    const fromHook = await this.opts.resolveChatMembers?.(chatId);
+    if (fromHook) return fromHook;
+
+    const idType = opts?.idType ?? 'open_id';
+    const pageSize = Math.min(Math.max(opts?.pageSize ?? 100, 1), 100);
+    const maxPages = opts?.maxPages ?? 10;
+    const out: ChatMember[] = [];
+    let pageToken: string | undefined;
+    try {
+      for (let page = 0; page < maxPages; page++) {
+        const r = (await this.rawClient.im.v1.chatMembers.get({
+          path: { chat_id: chatId },
+          params: { member_id_type: idType, page_size: pageSize, page_token: pageToken },
+        } as never)) as { data?: RawChatMembersPage };
+        const d = r?.data;
+        for (const it of d?.items ?? []) {
+          if (!it.member_id) continue;
+          out.push({
+            id: it.member_id,
+            idType: (it.member_id_type as IdType) ?? idType,
+            name: it.name,
+            tenantKey: it.tenant_key,
+            isBot: false,
+          });
+        }
+        if (!d?.has_more || !d.page_token) break;
+        pageToken = d.page_token;
+      }
+    } catch (e) {
+      throw classifyError(e, { to: chatId });
+    }
+    return out;
+  }
+
+  /**
+   * List the **bots** in a chat (`GET .../members/bots`) — the companion to
+   * {@link getChatMembers}, which returns users only (Feishu filters bots from
+   * that list). Returns {@link ChatMember}s with `isBot: true`, and seeds them
+   * into the roster so another bot can be `@`-ed by name **without** having
+   * appeared in an inbound mention first. Cached per chat like
+   * {@link getChatMembers} (`force` bypasses). Throws {@link LarkChannelError}
+   * on API failure.
+   *
+   * There is no typed node-sdk method for this endpoint, so it goes through the
+   * raw request; the response is `{ data: { items: [{ bot_id, bot_name }] } }`.
+   */
+  async getChatBots(chatId: string, opts?: { force?: boolean }): Promise<ChatMember[]> {
+    if (!opts?.force) {
+      const cached = this.chatMemberCache.getBots(chatId);
+      if (cached) return cached;
+    }
+    const bots = await this.fetchChatBots(chatId);
+    this.chatMemberCache.setBots(chatId, bots);
+    return bots;
+  }
+
+  private async fetchChatBots(chatId: string): Promise<ChatMember[]> {
+    try {
+      const r = await this.rawClient.request({
+        url: `/open-apis/im/v1/chats/${encodeURIComponent(chatId)}/members/bots`,
+        method: 'GET',
+      });
+      // client.request returns the parsed body; the envelope carries `data`,
+      // but tolerate a top-level `items` shape defensively.
+      const body = r as { data?: { items?: RawBotItem[] }; items?: RawBotItem[] };
+      const items = body.data?.items ?? body.items ?? [];
+      const out: ChatMember[] = [];
+      for (const it of items) {
+        if (!it.bot_id) continue;
+        out.push({ id: it.bot_id, idType: 'open_id', name: it.bot_name, isBot: true });
+      }
+      return out;
+    } catch (e) {
+      throw classifyError(e, { to: chatId });
+    }
+  }
+
+  /** Warm the roster for `senderName` resolution; failures degrade silently. */
+  private async warmChatRoster(chatId: string): Promise<void> {
+    try {
+      await this.getChatMembers(chatId);
+    } catch (e) {
+      this.logger.debug?.('channel: roster warm failed', e);
+    }
+  }
+
+  /**
+   * Record identities seen in a message's mentions (incl. bots) into the
+   * roster, so a bot that has "shown its face" can later be @'d by name.
+   * Source is 'mention' so it never overwrites authoritative API user names.
+   */
+  private collectMentionsIntoRoster(chatId: string, mentions: MentionInfo[]): void {
+    const seen: ChatMember[] = [];
+    for (const m of mentions) {
+      if (m.openId && m.name) seen.push({ id: m.openId, name: m.name, isBot: m.isBot });
+    }
+    if (seen.length) this.chatMemberCache.setMembers(chatId, seen, 'mention');
+  }
+
+  /**
    * Fetch a message by id and return it as a {@link NormalizedMessage} — the
    * same shape live `message` events produce. Useful for resolving a
    * reply-quoted message: `im.v1.message.get` returns a flat item list
@@ -838,7 +1065,24 @@ export class LarkChannel {
       // IM message — full safety pipeline
       'im.message.receive_v1': async (raw: unknown) => {
         try {
-          const msg = await normalize(raw as RawMessageEvent, normalizeOpts);
+          const event = raw as RawMessageEvent;
+          const chatId = event.message.chat_id;
+
+          // Opt-in: warm the chat roster and resolve the sender's display name
+          // (Feishu omits it from message events). Best-effort; degrades to
+          // undefined on failure. Off by default (zero extra API).
+          let resolveSenderName: ((openId: string) => string | undefined) | undefined;
+          if (this.opts.resolveSenderNames) {
+            await this.warmChatRoster(chatId);
+            resolveSenderName = (openId) => this.chatMemberCache.resolveName(chatId, openId);
+          }
+
+          const msg = await normalize(event, { ...normalizeOpts, resolveSenderName });
+
+          // Collect observed mention identities (incl. bots, which the members
+          // API filters out) so they can later be @'d by name.
+          this.collectMentionsIntoRoster(chatId, msg.mentions);
+
           // Opt-in: resolve the finer-grained chat mode (p2p/group/topic),
           // which Feishu omits from the event. Cached per chatId; best-effort.
           if (this.opts.resolveChatMode) {

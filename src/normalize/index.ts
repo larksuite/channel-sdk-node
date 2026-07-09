@@ -87,6 +87,12 @@ export async function normalize(
   const senderId = senderOpenId ?? senderFallbackId;
   const senderName = senderOpenId ? opts.resolveSenderName?.(senderOpenId) : undefined;
 
+  // Pass through the raw sender kind (dropped until now). `senderIsBot` stays
+  // undefined when the kind is absent, so a missing signal is never read as
+  // "not a bot".
+  const senderType = event.sender.sender_type;
+  const senderIsBot = senderType === undefined ? undefined : senderType === 'bot';
+
   const createMs = msg.create_time ? parseInt(msg.create_time, 10) : 0;
 
   return {
@@ -95,6 +101,8 @@ export async function normalize(
     chatType: msg.chat_type as NormalizedMessage['chatType'],
     senderId,
     senderName,
+    senderType,
+    senderIsBot,
     content,
     rawContentType: msg.message_type,
     resources,
