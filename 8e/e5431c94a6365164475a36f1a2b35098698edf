@@ -1,0 +1,73 @@
+package.json
+  s_5e601bd1776551::t_c41b799ead155c 3
+src/safety/__tests__/loop-guard.test.ts
+  s_688da6c0523614::t_61e315e9fdade5 1-192
+src/outbound/__tests__/compose-mentions-escaping.test.ts
+  s_688da6c0523614::t_6587c5d1e51114 1-63
+src/safety/policy-gate.ts
+  s_5e601bd1776551::t_0e20da9e884de6 1,14-16,19-20,60-80
+src/__tests__/chat-members.test.ts
+  s_688da6c0523614::t_6b6f59f23fea69 1-142
+src/safety/loop-guard.ts
+  s_5e601bd1776551::t_0608763598700c 1-103
+src/channel.ts
+  s_5e601bd1776551::t_efb6dcaf3b3f57 13,34,40,45,48,60-80,109-110,349-366,402-403,410-460,759-839,1020-1037
+src/normalize/index.ts
+  s_5e601bd1776551::t_a10278791c9890 90-95,104-105
+src/__tests__/bot-identity.test.ts
+  s_688da6c0523614::t_01295bcacb9d02 1-45
+README.md
+  s_5e601bd1776551::t_50810a622b5181 103-104,118,153-155,178,212,223-224,238,297-376
+src/outbound/markdown/compose-mentions.ts
+  s_5e601bd1776551::t_2c155deef3880c 3-22,35-36,54-59
+src/normalize/__tests__/sender-type.test.ts
+  s_688da6c0523614::t_15c8c21d16c85c 1-73
+src/outbound/__tests__/resolve-mentions.test.ts
+  s_688da6c0523614::t_7a7067443efc77 1-82
+src/index.ts
+  s_5e601bd1776551::t_38349655b2e69e 33,39
+README.zh.md
+  s_5e601bd1776551::t_e15f2e5ae8c665 89-90,104,138-140,163,193,204-205,219,273-334
+src/chat-member-cache.ts
+  s_5e601bd1776551::t_73b9e18ac5ae80 1-170
+src/outbound/markdown/resolve-mentions.ts
+  s_5e601bd1776551::t_f5169a9c652d13 1-109
+src/__tests__/sender-name.test.ts
+  s_688da6c0523614::t_2c7bfead60dd01 1-117
+src/safety/index.ts
+  s_5e601bd1776551::t_8ec4d967731106 13,26,54,77-78,103-120
+src/types.ts
+  s_5e601bd1776551::t_f5c6e148819706 24-36,98-104,182-185,192-193,354-373,450-457,460-466,470-495,547-562
+src/__tests__/reply.test.ts
+  s_688da6c0523614::t_1e73242016fbd9 1-70
+src/__tests__/chat-member-cache.test.ts
+  s_688da6c0523614::t_05ee0691c391ca 1-88
+src/safety/__tests__/policy-allowlist-warn.test.ts
+  s_688da6c0523614::t_fb85de0de79b0a 1-80
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "8ee5431c94a6365164475a36f1a2b35098698edf",
+  "prompts": {},
+  "sessions": {
+    "s_5e601bd1776551": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c5db7848-5c43-486e-8fb0-5f1244219a59",
+        "model": "unknown"
+      },
+      "human_author": "mazhe.nerd <mazhe.nerd@bytedance.com>"
+    },
+    "s_688da6c0523614": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-ac08d810f4fae6b6f",
+        "model": "unknown"
+      },
+      "human_author": "mazhe.nerd <mazhe.nerd@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
