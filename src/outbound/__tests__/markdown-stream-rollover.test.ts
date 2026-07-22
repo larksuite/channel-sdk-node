@@ -165,10 +165,9 @@ describe('MarkdownStreamController rollover', () => {
 
   test('accumulated-mode producer survives rollover (full text re-sent each chunk)', async () => {
     // Accumulated-mode producers re-send the full history each chunk via
-    // setContent (the full-replacement API). After rollover this.content
-    // is reset to the tail; the next setContent replaces it with the
-    // current full snapshot, which rolls over again — the final card must
-    // show only the trailing portion, never duplicated head bytes.
+    // setContent (the full-replacement API). After rollover, already
+    // finalized chunks must stay on their original cards while the latest
+    // card receives only the still-uncommitted tail.
     const { sender, calls } = makeStubSender({ cap: 100 });
     const ctrl = new MarkdownStreamControllerImpl(sender, 'oc_x', 'chat_id', {});
 
@@ -190,5 +189,33 @@ describe('MarkdownStreamController rollover', () => {
     expect(lastSnapshot).toContain('c'.repeat(10)); // tail content present
     // tail should not double-contain the head bytes.
     expect(lastSnapshot.match(/aaaaaaaaaa/g)?.length ?? 0).toBeLessThanOrEqual(1);
+  });
+
+  test('accumulated snapshots do not roll already-finalized prefixes into new cards again', async () => {
+    const { sender, calls } = makeStubSender({ cap: 40 });
+    const ctrl = new MarkdownStreamControllerImpl(sender, 'oc_x', 'chat_id', {});
+    const a = 'a'.repeat(30);
+    const b = 'b'.repeat(30);
+    const c = 'c'.repeat(30);
+
+    await ctrl.run(async (stream) => {
+      await stream.setContent(`${a}\n${b}`);
+      await flushAll();
+      await stream.setContent(`${a}\n${b}\n${c}`);
+      await flushAll();
+    });
+
+    expect(calls.createCardInstance).toHaveBeenCalledTimes(3);
+    expect(calls.sendCardByReference).toHaveBeenCalledTimes(3);
+
+    const finalized = calls.finishStreamingCard.mock.calls.map(([cardId, _sequence, summary]) => ({
+      cardId,
+      summary,
+    }));
+    expect(finalized).toEqual([
+      { cardId: 'card_1', summary: a },
+      { cardId: 'card_2', summary: b },
+      { cardId: 'card_3', summary: c },
+    ]);
   });
 });

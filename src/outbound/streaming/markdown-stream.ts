@@ -90,6 +90,12 @@ function buildStreamingCard(initialText: string): object {
 export class MarkdownStreamControllerImpl implements MarkdownStreamControllerPublic {
   /** Content of the current (latest) card's markdown element. */
   private content = '';
+  /**
+   * Latest producer-supplied full snapshot. Once setContent() is used,
+   * subsequent appends extend this logical document so rollover can derive
+   * the current card from the whole stream without replaying finalized cards.
+   */
+  private fullSnapshot: string | undefined;
   private _messageId = '';
   private cardId = '';
   private sequence = 0;
@@ -136,13 +142,17 @@ export class MarkdownStreamControllerImpl implements MarkdownStreamControllerPub
     // producers must use setContent — auto-detecting the two modes is
     // ambiguous and silently drops legitimate repeated boundary chars
     // (e.g. '共 3' + '3 条' must render '共 33 条', not '共 3 条').
-    this.content += chunk;
+    if (this.fullSnapshot !== undefined) {
+      this.fullSnapshot += chunk;
+    } else {
+      this.content += chunk;
+    }
     this.throttle.note(chunk.length);
   }
 
   async setContent(full: string): Promise<void> {
     await this.ensureStarted();
-    this.content = full ?? '';
+    this.fullSnapshot = full ?? '';
     this.throttle.note(Number.MAX_SAFE_INTEGER);
   }
 
@@ -199,6 +209,13 @@ export class MarkdownStreamControllerImpl implements MarkdownStreamControllerPub
    * pushContent and the terminal helpers so they share rollover behavior.
    */
   private async pushSnapshot(): Promise<void> {
+    if (this.fullSnapshot !== undefined) {
+      const chunks = splitWithCodeFences(this.fullSnapshot, this.maxChars);
+      // Each rollover permanently commits one leading chunk to an older
+      // card. setContent() supplies the whole logical document again, so
+      // only the chunks not already committed belong on the current card.
+      this.content = chunks.slice(this.rolloverMessageIds.length).join('\n');
+    }
     while (this.content.length > this.maxChars) {
       await this.rollover();
     }
@@ -293,7 +310,11 @@ export class MarkdownStreamControllerImpl implements MarkdownStreamControllerPub
     this.throttle.dispose();
     if (!this.cardId) return;
 
-    this.content = (this.content || '') + ERROR_FOOTER;
+    if (this.fullSnapshot !== undefined) {
+      this.fullSnapshot += ERROR_FOOTER;
+    } else {
+      this.content = (this.content || '') + ERROR_FOOTER;
+    }
     await this.queue.enqueue(async () => {
       try {
         await this.pushSnapshot();
