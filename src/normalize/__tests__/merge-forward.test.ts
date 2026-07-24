@@ -159,7 +159,9 @@ describe('convertMergeForward', () => {
     expect(count).toBeGreaterThanOrEqual(2);
   });
 
-  test('handles fetchSubMessages failure gracefully', async () => {
+  test('marks content fetch_failed when fetchSubMessages throws', async () => {
+    // A thrown fetch must be distinguishable from a genuinely empty forward:
+    // it carries a status marker rather than collapsing to the bare tag.
     const ctx: ConvertContext = {
       ...baseCtx,
       fetchSubMessages: async () => {
@@ -168,7 +170,7 @@ describe('convertMergeForward', () => {
       dispatch: fakeDispatch,
     };
     const r = await convertMergeForward('{}', ctx);
-    expect(r.content).toBe('<forwarded_messages/>');
+    expect(r.content).toBe('<forwarded_messages status="fetch_failed"/>');
   });
 
   test('displays resolved user name when resolver is available', async () => {
@@ -319,7 +321,7 @@ describe('convertMergeForward', () => {
     expect(r.resources[0]).toEqual({ type: 'image', fileKey: 'img_x' });
   });
 
-  test('returns empty resources when fetchSubMessages throws', async () => {
+  test('yields fetch_failed content and no resources when fetchSubMessages throws', async () => {
     const ctx: ConvertContext = {
       ...baseCtx,
       fetchSubMessages: async () => {
@@ -328,7 +330,20 @@ describe('convertMergeForward', () => {
       dispatch: resourceDispatch,
     };
     const r = await convertMergeForward('{}', ctx);
+    expect(r.content).toBe('<forwarded_messages status="fetch_failed"/>');
     expect(r.resources).toEqual([]);
+  });
+
+  test('returns the bare empty tag (no status) when fetchSubMessages resolves to no items', async () => {
+    // Vacuous success must NOT be reported as a failure — the bare tag has no
+    // status attribute, unlike the fetch_failed marker.
+    const ctx: ConvertContext = {
+      ...baseCtx,
+      fetchSubMessages: async () => [],
+      dispatch: fakeDispatch,
+    };
+    const r = await convertMergeForward('{}', ctx);
+    expect(r.content).toBe('<forwarded_messages/>');
   });
 
   test('text-only forward keeps content unchanged and yields no resources', async () => {
