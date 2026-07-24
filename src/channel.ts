@@ -29,7 +29,7 @@ import {
   normalizeComment,
   normalizeReaction,
 } from './normalize';
-import { OutboundSender } from './outbound';
+import { OutboundSender, retry } from './outbound';
 import { classifyError } from './outbound/errors';
 import { resolveMentionsInText, resolveNameMentions } from './outbound/markdown/resolve-mentions';
 import { SafetyPipeline } from './safety';
@@ -940,17 +940,8 @@ export class LarkChannel {
     // Reuse the already-fetched items when normalize re-asks for sub-messages
     // of this same id (merge_forward); nested merge_forwards fall back to a
     // fresh API call.
-    const fetchSubMessages = async (mid: string): Promise<ApiMessageItem[]> => {
-      if (mid === parent.message_id) return items;
-      try {
-        const r = (await this.rawClient.im.v1.message.get({
-          path: { message_id: mid },
-        })) as { data?: { items?: ApiMessageItem[] } };
-        return r?.data?.items ?? [];
-      } catch {
-        return [];
-      }
-    };
+    const fetchSubMessages = (mid: string): Promise<ApiMessageItem[]> =>
+      mid === parent.message_id ? Promise.resolve(items) : this.fetchMessageItemsWithRetry(mid);
 
     const senderOpenId = parent.sender?.id;
     const fakeRaw: RawMessageEvent = {
@@ -978,6 +969,32 @@ export class LarkChannel {
       this.logger.warn?.('channel: fetchMessage normalize failed', e);
       return undefined;
     }
+  }
+
+  /**
+   * Read a message's `data.items[]` (`im.v1.message.get`) with retry — used to
+   * expand merge-forward sub-messages. Wraps the GET in the shared
+   * exponential-backoff {@link retry}: transient upstream failures
+   * (5xx → `unknown`, `rate_limited`) and — since this is an idempotent read —
+   * timeouts are retried; non-transient errors (permission / not-found /
+   * format) fail fast. On exhaustion it **throws** the classified
+   * {@link LarkChannelError} instead of degrading to `[]`, so the converter can
+   * tell "fetch failed" apart from "genuinely empty". The failure is warn-logged
+   * here (once, after retries) before re-throwing.
+   */
+  private fetchMessageItemsWithRetry(messageId: string): Promise<ApiMessageItem[]> {
+    return retry(
+      async () => {
+        const r = (await this.rawClient.im.v1.message.get({
+          path: { message_id: messageId },
+        })) as { data?: { items?: ApiMessageItem[] } };
+        return r?.data?.items ?? [];
+      },
+      { ...(this.opts.outbound?.retry ?? {}), retryTimeouts: true },
+    ).catch((e) => {
+      this.logger.warn?.('channel: fetchSubMessages failed', e);
+      throw e;
+    });
   }
 
   // ─── runtime config ────────────────────────────────────
@@ -1037,18 +1054,8 @@ export class LarkChannel {
     // (Earlier attempts used `message.list` with
     // `container_id_type: 'message'`, which Feishu rejects — 'message'
     // isn't a valid container type.)
-    const fetchSubMessages = async (mid: string): Promise<ApiMessageItem[]> => {
-      try {
-        const r = await this.rawClient.im.v1.message.get({
-          path: { message_id: mid },
-        });
-        const items = (r as { data?: { items?: ApiMessageItem[] } }).data?.items ?? [];
-        return items;
-      } catch (e) {
-        this.logger.warn?.('channel: fetchSubMessages failed', e);
-        return [];
-      }
-    };
+    const fetchSubMessages = (mid: string): Promise<ApiMessageItem[]> =>
+      this.fetchMessageItemsWithRetry(mid);
 
     // Unified raw-event flag: prefer the new `includeRawEvent` option,
     // fall back to the legacy `includeRawInMessage` for back-compat.

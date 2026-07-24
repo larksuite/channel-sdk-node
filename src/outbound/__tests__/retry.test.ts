@@ -67,4 +67,49 @@ describe('retry', () => {
     ).rejects.toMatchObject({ code: 'send_timeout' });
     expect(calls).toBe(1);
   });
+
+  // The inbound read path (idempotent message.get) opts into retrying timeouts.
+  test('retries send_timeout when retryTimeouts is enabled', async () => {
+    let calls = 0;
+    const r = await retry(
+      async () => {
+        calls++;
+        if (calls < 2) throw new LarkChannelError('send_timeout', 'slow');
+        return 'ok';
+      },
+      { maxAttempts: 3, baseDelayMs: 1, retryTimeouts: true },
+    );
+    expect(r).toBe('ok');
+    expect(calls).toBe(2);
+  });
+
+  test('gives up on send_timeout after maxAttempts when retryTimeouts is enabled', async () => {
+    let calls = 0;
+    await expect(
+      retry(
+        async () => {
+          calls++;
+          throw new LarkChannelError('send_timeout', 'slow');
+        },
+        { maxAttempts: 3, baseDelayMs: 1, retryTimeouts: true },
+      ),
+    ).rejects.toMatchObject({ code: 'send_timeout' });
+    expect(calls).toBe(3);
+  });
+
+  // Explicit false must stay fail-fast — the outbound send path relies on this
+  // so a hung request is never re-sent.
+  test('does not retry send_timeout when retryTimeouts is false', async () => {
+    let calls = 0;
+    await expect(
+      retry(
+        async () => {
+          calls++;
+          throw new LarkChannelError('send_timeout', 'slow');
+        },
+        { maxAttempts: 3, baseDelayMs: 1, retryTimeouts: false },
+      ),
+    ).rejects.toMatchObject({ code: 'send_timeout' });
+    expect(calls).toBe(1);
+  });
 });

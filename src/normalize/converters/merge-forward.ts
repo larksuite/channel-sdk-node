@@ -4,6 +4,12 @@ import { formatRFC3339Beijing, indentLines } from '../utils';
 
 const MAX_ITEMS = 50;
 
+// Emitted when sub-message fetch fails after retries (or on a non-transient
+// error). Kept distinct from the bare `<forwarded_messages/>` empty tag so
+// downstream can tell "fetch failed" apart from "genuinely empty" instead of
+// treating dropped content as an empty forward.
+const FORWARDED_FETCH_FAILED = '<forwarded_messages status="fetch_failed"/>';
+
 // Internal render result: a sub-item's rendered text plus the resources it (and
 // any descendants) carry, each already stamped with its owning message id.
 interface RenderedItem {
@@ -22,7 +28,9 @@ export const convertMergeForward: ContentConverterFn = async (_raw, ctx) => {
   try {
     items = await fetchSubMessages(messageId);
   } catch {
-    return { content: '<forwarded_messages/>', resources: [] };
+    // Fetch failed after retries (or hit a non-transient error). Surface a
+    // distinct marker rather than silently degrading to an empty forward.
+    return { content: FORWARDED_FETCH_FAILED, resources: [] };
   }
 
   if (!items || items.length === 0) {

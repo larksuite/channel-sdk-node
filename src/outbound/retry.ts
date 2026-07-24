@@ -4,12 +4,20 @@ import { classifyError, isRetryable } from './errors';
 export interface RetryOptions {
   maxAttempts?: number; // default 3
   baseDelayMs?: number; // default 500
+  /**
+   * Also retry `send_timeout` errors. Off by default so send paths keep their
+   * fail-fast-on-timeout behavior (a timed-out send may have landed — retrying
+   * risks a duplicate). Idempotent read paths (e.g. fetching merge-forward
+   * sub-messages) turn this on: a timed-out GET is safe to re-issue.
+   */
+  retryTimeouts?: boolean;
 }
 
 /**
  * Execute `op` with exponential backoff. Only retries errors classified as
- * retryable (rate_limited / unknown). Business errors (format / revoked /
- * permission / timeout) fail fast and bubble up.
+ * retryable (rate_limited / unknown), plus `send_timeout` when
+ * `retryTimeouts` is set. Business errors (format / revoked / permission)
+ * fail fast and bubble up.
  */
 export async function retry<T>(
   op: (attempt: number) => Promise<T>,
@@ -25,7 +33,8 @@ export async function retry<T>(
     } catch (raw) {
       const err = classifyError(raw, { attempt });
       lastErr = err;
-      if (attempt >= max || !isRetryable(err)) {
+      const retryable = isRetryable(err) || (!!opts.retryTimeouts && err.code === 'send_timeout');
+      if (attempt >= max || !retryable) {
         throw err;
       }
       const delay = base * 3 ** (attempt - 1);
