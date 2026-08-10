@@ -1,5 +1,6 @@
 import type { Cache, Domain, HttpInstance, LoggerLevel } from '@larksuiteoapi/node-sdk';
 import type { Logger, WSConfigOverrides } from './internal';
+import type { MeetingChannelConfig, MeetingInvitedEvent } from './meeting/types';
 
 // ─────────────────────────────────────────────────────────────
 // Normalized inbound message — the core output of the channel
@@ -158,6 +159,11 @@ export type CardActionResponse = Record<string, unknown>;
 
 export interface EventMap {
   message: (msg: NormalizedMessage) => void | Promise<void>;
+  /**
+   * The bot was invited into a meeting. Single-slot like every other channel
+   * event: one invite maps to one decision about whether to join.
+   */
+  meetingInvited: (evt: MeetingInvitedEvent) => void | Promise<void>;
   reject: (evt: RejectEvent) => void;
   cardAction: (
     evt: CardActionEvent,
@@ -261,6 +267,12 @@ export type LarkChannelErrorCode =
   | 'ssrf_blocked'
   | 'send_timeout'
   | 'not_connected'
+  /** The operation is unavailable in the current mode (e.g. posting from a followed meeting). */
+  | 'not_supported'
+  /** No active meeting to follow, or the target meeting is no longer active. */
+  | 'meeting_not_found'
+  /** {@link MeetingChannelConfig.maxConcurrentSessions} reached. */
+  | 'too_many_sessions'
   | 'unknown';
 
 export class LarkChannelError extends Error {
@@ -268,7 +280,21 @@ export class LarkChannelError extends Error {
 
   cause?: unknown;
 
-  context?: { to?: string; messageId?: string; attempt?: number };
+  context?: {
+    to?: string;
+    messageId?: string;
+    attempt?: number;
+    meetingId?: string;
+    /**
+     * Signed one-click authorization link returned with a permission failure.
+     *
+     * A credential in URL form, not a plain link: passed through byte for byte
+     * because re-encoding invalidates the signature, validated as `https:` before
+     * being surfaced at all, and never written to a log. Do not echo it into a
+     * chat, a UI, or a support ticket.
+     */
+    consoleUrl?: string;
+  };
 
   constructor(
     code: LarkChannelErrorCode,
@@ -297,6 +323,12 @@ export interface LarkChannelOptions {
   safety?: SafetyConfig;
   policy?: PolicyConfig;
   outbound?: OutboundConfig;
+
+  /**
+   * Meeting-channel limits: concurrent sessions, idle reclamation, liveness
+   * probing and the in-meeting send rate. See {@link MeetingChannelConfig}.
+   */
+  meeting?: MeetingChannelConfig;
 
   logger?: Logger;
   loggerLevel?: LoggerLevel;
