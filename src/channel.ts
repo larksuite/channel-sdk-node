@@ -21,6 +21,14 @@ import {
   type WSConnectionStatus,
 } from './internal';
 import { type KeepaliveHandle, startKeepalive } from './keepalive';
+import { MeetingChannel } from './meeting';
+import type {
+  FollowMeetingOptions,
+  JoinMeetingOptions,
+  MeetingEventHealth,
+  MeetingMembership,
+  MeetingSession,
+} from './meeting/types';
 import type { ApiMessageItem, RawMessageEvent } from './normalize';
 import {
   normalize,
@@ -94,6 +102,13 @@ export class LarkChannel {
   /** Cloud-doc comment surface: fetch / reply / reactions with quirk fallbacks. */
   readonly comments: CommentSurface;
 
+  /**
+   * Meeting channel internals. Private so its wiring methods do not become de
+   * facto public API of a pre-1.0 package — the supported surface is
+   * {@link joinMeeting}, {@link followMyMeeting} and {@link getMeetingEventHealth}.
+   */
+  private readonly meetings: MeetingChannel;
+
   private readonly opts: LarkChannelOptions;
 
   private readonly logger: Logger;
@@ -117,6 +132,22 @@ export class LarkChannel {
   private keepaliveHandle?: KeepaliveHandle;
 
   private proxyAgent?: HttpsProxyAgent<string>;
+
+  /**
+   * The channel's own dispatcher handlers, keyed by event type. Read at dispatch
+   * time rather than captured, so `onRawEvent` can compose with them whether it
+   * is called before or after `connect()`.
+   */
+  private builtinHandlers: Record<string, (raw: unknown) => unknown> = {};
+
+  private readonly rawHandlers = new Map<string, Set<(payload: unknown) => unknown>>();
+
+  /**
+   * Event types already wired into the dispatcher. `EventDispatcher.register`
+   * logs an error when a key is re-registered, so each type gets exactly one
+   * composed entry and the composition reads mutable state instead.
+   */
+  private readonly dispatchedTypes = new Set<string>();
 
   constructor(opts: LarkChannelOptions) {
     this.opts = opts;
@@ -148,6 +179,20 @@ export class LarkChannel {
     this.sender = new OutboundSender(this.rawClient, opts.outbound ?? {}, this.logger);
 
     this.comments = new CommentSurface(this.rawClient, this.logger);
+
+    this.meetings = new MeetingChannel({
+      client: this.rawClient,
+      logger: this.logger,
+      cache: opts.cache ?? internalCache,
+      config: opts.meeting,
+      includeRaw: opts.includeRawEvent ?? opts.includeRawInMessage ?? false,
+      // Late-bound: the bot's own open_id is only known once connected, and
+      // selfEcho compares against it.
+      botOpenId: () => this.botIdentity?.openId,
+      isConnected: () => this.connected,
+      invitedHandler: () => this.handlers.meetingInvited,
+      onError: (e) => this.emitError(e),
+    });
 
     this.configureHttp();
 
@@ -328,6 +373,12 @@ export class LarkChannel {
     if (!this.connected) return;
     this.keepaliveHandle?.stop();
     this.keepaliveHandle = undefined;
+    // Dispose, never leave: a reconnect must not make the bot disappear from
+    // every meeting it is in. Two consequences the caller has to handle, both
+    // documented on `getRetainedMeetings`: sessions end with `disposed` and are
+    // NOT rebuilt by a later `connect()`, and the bot lingers as a participant
+    // until someone leaves it.
+    this.meetings.disposeAll();
     try {
       this.rawWsClient?.close({});
     } catch {
@@ -1068,7 +1119,7 @@ export class LarkChannel {
       fetchSubMessages,
     };
 
-    this.dispatcher.register({
+    this.builtinHandlers = {
       // IM message — full safety pipeline
       'im.message.receive_v1': async (raw: unknown) => {
         try {
@@ -1167,7 +1218,127 @@ export class LarkChannel {
           },
         );
       },
+
+      // Meeting channel — the three vc.bot.* events, registered internally so
+      // callers never have to wire them up themselves.
+      ...this.meetings.handlers(),
+    };
+
+    this.meetings.markRegistered();
+    for (const type of Object.keys(this.builtinHandlers)) this.ensureDispatchEntry(type);
+  }
+
+  /**
+   * Subscribe to a Feishu event type the channel does not wrap.
+   *
+   * Multicast; the returned function removes only this handler. Without this the
+   * alternatives are reaching into the dispatcher's private map, which breaks on
+   * a version bump, or opening a second long-lived connection — and a second
+   * connection for the same app makes Feishu split delivery between them, so the
+   * channel's own IM traffic starts disappearing.
+   *
+   * **Raw handlers run outside the safety pipeline.** They run after signature
+   * verification and decryption, but `PolicyGate` (`dmMode`, `dmAllowlist`,
+   * `groupAllowlist`, `requireMention`), dedup, the per-chat processing lock, the
+   * loop guard and the stale-message filter are all downstream of normalization
+   * and do not apply here. Registering a raw handler for an event type the channel
+   * already handles therefore opens a path around those checks — deliberately,
+   * but worth knowing before using it on `im.message.receive_v1`.
+   *
+   * The payload is the decrypted platform event, unredacted and unaffected by
+   * `includeRawEvent: false`: it carries `tenant_key`, full user ids and message
+   * bodies.
+   *
+   * Handlers are awaited before the dispatcher replies to Feishu, so that replies
+   * stay ordered after them. On `card.action.trigger` that matters: a slow raw
+   * handler delays the callback response past Feishu's timeout even though its
+   * return value is discarded. Keep raw handlers on that event type cheap, or hand
+   * the work to a queue.
+   */
+  onRawEvent(eventType: string, handler: (payload: unknown) => void | Promise<void>): Unsubscribe {
+    let set = this.rawHandlers.get(eventType);
+    if (!set) {
+      set = new Set();
+      this.rawHandlers.set(eventType, set);
+    }
+    set.add(handler);
+    this.ensureDispatchEntry(eventType);
+    return () => {
+      set?.delete(handler);
+    };
+  }
+
+  private ensureDispatchEntry(eventType: string): void {
+    if (this.dispatchedTypes.has(eventType)) return;
+    this.dispatchedTypes.add(eventType);
+    this.dispatcher.register({
+      [eventType]: (raw: unknown) => this.dispatchToHandlers(eventType, raw),
     } as never);
+  }
+
+  /**
+   * Built-in first, raw handlers after, and the built-in's return value is the
+   * one that goes back to Feishu — a card action's callback response must not be
+   * rewritable by an observer that merely subscribed to the same event.
+   */
+  private async dispatchToHandlers(eventType: string, raw: unknown): Promise<unknown> {
+    const builtin = this.builtinHandlers[eventType];
+    const result = builtin ? await builtin(raw) : undefined;
+
+    for (const handler of [...(this.rawHandlers.get(eventType) ?? [])]) {
+      try {
+        await handler(raw);
+      } catch (e) {
+        // Contained: a raw subscriber must not break the built-in path.
+        this.emitError(e);
+      }
+    }
+    return result;
+  }
+
+  // ─── meeting channel ───────────────────────────────────
+
+  /**
+   * Put the bot in a meeting as a visible participant (app identity).
+   * Requires {@link connect} — this path is driven by event pushes.
+   */
+  async joinMeeting(meetingNo: string, opts?: JoinMeetingOptions): Promise<MeetingSession> {
+    return this.meetings.joinMeeting(meetingNo, opts);
+  }
+
+  /**
+   * Follow the meeting the given user access token's owner is currently in,
+   * without joining it (user identity). Does **not** require {@link connect}:
+   * this path is REST polling only.
+   */
+  async followMyMeeting(opts: FollowMeetingOptions): Promise<MeetingSession> {
+    return this.meetings.followMyMeeting(opts);
+  }
+
+  /**
+   * Diagnostics for the in-meeting event path, counted per link — `push` for event
+   * pushes, `poll` for REST reads. See {@link MeetingEventHealth}.
+   */
+  getMeetingEventHealth(): MeetingEventHealth {
+    return this.meetings.health();
+  }
+
+  /**
+   * Meetings the bot is still a participant of with nothing listening — what
+   * `disconnect()` leaves behind.
+   *
+   * `disconnect()` disposes sessions without leaving their meetings, so the bot stays in
+   * them; a later `connect()` re-registers the event handlers but does not rebuild the
+   * sessions, and their pushes are then dropped. Sessions signal this by ending with
+   * `reason: 'disposed'`.
+   *
+   * Re-attach with `joinMeeting(meetingNo)` — which does not consume a new concurrency
+   * slot for a meeting already held — or, once attached, `leave()` to give the slot back.
+   * Ignoring an entry here means the bot sits in a meeting deaf, holding a slot, until
+   * the meeting ends.
+   */
+  getRetainedMeetings(): MeetingMembership[] {
+    return this.meetings.retainedMeetings();
   }
 
   private emitError(e: unknown): void {

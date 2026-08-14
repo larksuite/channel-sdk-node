@@ -262,6 +262,184 @@ Media `source` accepts a URL / local path / Buffer, with a built-in SSRF guard.
 | `reply` | `reply(target, commentId, text): Promise<void>` | Falls back to a fresh top-level comment for whole-doc comments |
 | `addReaction` / `removeReaction` | `(target, replyId, emojiType = 'Typing')` | Comment reactions |
 
+### Meetings — `channel.joinMeeting` / `channel.followMyMeeting`
+
+The two entry points correspond to the two identities. Both return a
+`MeetingSession` with the same events and methods.
+
+| Method | Signature | Identity |
+|---|---|---|
+| `followMyMeeting` | `(opts: FollowMeetingOptions): Promise<MeetingSession>` | **User access token.** Follows the meeting its owner is in; nothing appears in the meeting |
+| `joinMeeting` | `(meetingNo: string, opts?: JoinMeetingOptions): Promise<MeetingSession>` | App (tenant) credentials. The bot joins as a visible participant |
+| `getMeetingEventHealth` | `(): MeetingEventHealth` | Diagnostics for the in-meeting event path |
+| `getRetainedMeetings` | `(): MeetingMembership[]` | Meetings the bot is in with no session listening |
+
+```ts
+// User identity — no connect() needed, this path is REST polling only.
+const m = await channel.followMyMeeting({
+  userAccessToken: () => myAuth.freshToken(), // re-read before every poll
+  stabilizeMs: 800,                           // deliver a sentence once it settles
+});
+
+// App identity — requires connect(), it is driven by event pushes.
+channel.on('meetingInvited', async (invite) => {
+  const m = await channel.joinMeeting(invite.meetingNo, { callId: invite.callId });
+
+  m.on('chat', async ({ content, selfEcho }) => {
+    if (selfEcho) return;                     // see "Answering yourself" below
+    await m.sendMessage(`heard: ${content}`);
+  });
+});
+```
+
+| Session event | Payload | Notes |
+|---|---|---|
+| `transcript` | `{ actor, text, sentenceId, language, startMs, endMs, selfEcho }` | Captions. A later delivery of the same `sentenceId` supersedes the earlier text; requires captions / transcription to be on in the meeting |
+| `chat` | `{ actor, content, messageId, messageType, sendTime, selfEcho }` | In-meeting chat. The bot's own messages come back here with `selfEcho: true` |
+| `participant` | `{ actor, action: 'joined' \| 'left', joinTime, leaveTime, leaveReason }` | Participants arriving and leaving. `leaveReason` is the platform's raw value |
+| `share` | `{ actor, action: 'started' \| 'ended', shareId, doc, time }` | Document sharing started / ended. A hand-off arrives as a pair in one delivery, and the order carries the meaning |
+| `documentContext` | `{ contextType, commentFocus \| sectionLocation \| elementPreview, … }` | A context change inside a shared document (comment focus / section location / element preview). Identifiers only — no body text or assets |
+| `end` | `{ meetingId, reason }` | The session ended. `reason` is a `MeetingEndReason`: `meeting_ended` / `no_longer_active` / `idle_timeout` / `error` / `left` / `disposed` |
+| `error` | `LarkChannelError` | An error inside the session (poll failure, unpacking, a throwing handler). With no handler registered it degrades to a log rather than an unhandled rejection |
+
+`session.on()` is **multicast** (unlike `channel.on()`, which is single-slot):
+several handlers per event, and the returned function removes only its own.
+
+| Method | Notes |
+|---|---|
+| `sendMessage(text)` | In-meeting message. Rejects with `not_supported` in follow mode — the bot is not in the meeting |
+| `leave()` | Leave the meeting and free the slot, then end the session. Idempotent, reclaims even if the API call fails, and **still works after the session has ended** |
+| `dispose()` | Stop timers and subscriptions **without leaving**. Idempotent |
+| `getStats()` | Per-activity-type parse counters for this session |
+
+#### Semantics
+
+**`dispose()` and `leave()`** — `dispose()` stops the session's timers and event
+subscriptions without calling any API; the bot stays in the meeting. `leave()` calls
+`bots/leave` to remove the bot from the meeting, returns the concurrency slot, and then
+ends the session; it remains callable after the session has already ended, including
+after `dispose()` or `disconnect()`. `disconnect()` disposes every live session.
+
+**After `disconnect()`, re-attach** — `disconnect()` disposes sessions but does not leave
+their meetings, so the bot stays in them; a later `connect()` re-registers the event
+handlers but does **not** rebuild the sessions, and pushes for those meetings are then
+dropped. Sessions signal it by ending with `reason: 'disposed'`.
+`getRetainedMeetings()` lists them as `{ meetingId, meetingNo }`; re-attach with
+`joinMeeting(meetingNo)`, which does not consume a new concurrency slot for a meeting
+already held, or call `leave()` on the new session to give the slot back. Ignoring an
+entry leaves the bot in a meeting deaf, holding a slot, until the meeting ends.
+
+**`meeting.idleTimeoutMs`** — Idle reclamation threshold in ms, default `0` (off). With
+a positive value, a session that receives no in-meeting activity for that long ends,
+calls `bots/leave`, and returns its slot. App identity only.
+
+**`meeting.livenessProbeIntervalMs`** — Probe interval in ms, default `300000`.
+Periodically confirms the bot is still in the meeting, covering the cases that produce
+no `meeting_ended_v1` (removed by a host, meeting handed over). App identity only.
+
+**`meeting.maxConcurrentSessions`** — Ceiling on concurrent sessions, default `32`. At
+the ceiling `joinMeeting()` throws `too_many_sessions` and no `bots/join` request is
+sent. The count tracks meetings joined and not yet left, so `disconnect()` does not
+release it and `leave()` does.
+
+**`meeting.sendRateLimitPerMinute`** — In-meeting messages per session per minute,
+default `20`. Beyond it `sendMessage()` throws `rate_limited`.
+
+**`selfEcho`** — Marks an item produced by this bot: messages it sends come back as
+`chat`, and its speech is transcribed into `transcript`. Flagged items are delivered as
+usual, leaving the decision to ignore them to the caller. It reports `true` while the
+bot's own open_id is unresolved, and is always `false` in follow mode.
+
+**Delivery order** — Items within one delivery are handed over serially in array order,
+and an async handler's return value is awaited before the next item is delivered.
+
+**`stabilizeMs`** — Caption settling window in ms, default `0`. With `0` every text
+change is delivered; with a positive value a `sentenceId` is delivered once it has
+received no new content for that long. Later deliveries of the same `sentenceId`
+supersede earlier text, so callers should upsert on it.
+
+Which send is later is decided by `endMs`, not by arrival order: a session ingests from
+event pushes and from the liveness probe's REST read, so an earlier, shorter version of a
+sentence can arrive last. While settling, a send whose `endMs` is older than the one held
+is ignored. Equal values keep last-arrival-wins, since a transcription fix rewrites a
+sentence without extending it. With `stabilizeMs: 0` there is no buffer to compare
+against, so ordering is the caller's to handle.
+
+**`getMeetingEventHealth()`** — Returns counters for each of the two inbound links,
+`{ push, poll }`. Both carry `received` (activities received), `lastAt`, and per activity
+type a `{ received, empty }` pair; `empty` counts activities of that type that unpacked
+to zero items, which distinguishes "the platform never sent it" from "it arrived and
+could not be read".
+
+`push` additionally carries `registered` (whether the channel's internal `vc.bot.*`
+handlers are registered, set by `connect()`) and `reason` when it is not. `registered`
+describes registration, not connectivity: it stays `true` across a dropped and
+reconnecting WebSocket. `poll` additionally carries `sessions`, the number of live follow
+sessions, so `received: 0` with `sessions: 0` reads as "nothing to poll" rather than a
+fault.
+
+The links are counted separately because they fail independently — pushes can stop while
+polling keeps working, and one total would let either link's traffic stand in for the
+other's health. The split is by transport, not by session identity: an app-identity
+session's liveness probe reads over REST, so what it recovers counts under `poll`.
+
+**Follow-mode visibility** — Follow mode does not join the meeting: no bot appears in
+the participant list, while everything every participant says is readable. Informing
+participants and obtaining their agreement is the integrator's responsibility; the SDK
+surfaces nothing on their behalf.
+
+Examples: [`examples/10-meeting-follow.ts`](examples/10-meeting-follow.ts),
+[`examples/11-meeting-join.ts`](examples/11-meeting-join.ts).
+
+### Unwrapped events — `channel.onRawEvent`
+
+```ts
+const off = channel.onRawEvent('vc.bot.meeting_started_v1', (payload) => { … });
+off(); // removes this one handler
+```
+
+**What it does** — registers a callback under a Feishu event type name and hands it
+the decrypted event payload as the platform sent it. Several handlers can share one
+event type without replacing each other; the return value removes the one you just
+registered.
+
+**The problem it solves** — the channel wraps a fixed set of event types: IM
+messages, card actions, reactions, bot-added, Drive comments, and the three meeting
+pushes the meeting channel runs on (`vc.bot.meeting_invited_v1`, `_activity_v1`,
+`_ended_v1`). Everything else — approvals, calendar, contact changes, and
+`vc.bot.meeting_started_v1` in the snippet above — has no entry point of its own.
+The two workarounds are both bad: writing into the dispatcher's private handler map
+breaks on a version bump,
+and opening a second connection for the same app makes Feishu split delivery
+between the two connections, so the channel's own IM messages start arriving
+intermittently. `onRawEvent` puts these event types on the connection the channel
+already holds.
+
+**Side effects** — the callback receives the event *unprocessed*, so the channel's
+inbound protections do not apply to it. Signature verification and decryption still
+happen (they are a layer earlier), but every step after normalization is skipped:
+`PolicyGate` (`dmMode`, `dmAllowlist`, `groupAllowlist`, `requireMention`), dedup,
+the per-chat serialization lock, the loop guard, stale-event dropping. In practice:
+
+- Registering a raw handler for a type the channel **already wraps** opens a second,
+  unguarded entry point for it. `im.message.receive_v1` is the one to watch: a
+  message your allowlist rejects on the built-in path still reaches the raw handler.
+- The payload is not redacted and `includeRawEvent: false` does not affect it — it
+  carries `tenant_key`, full user ids and message bodies. Logging it or forwarding
+  it to a third party is on you.
+- A raw handler is a pure observer: its return value is always discarded (the
+  signature is `=> void | Promise<void>`), so it cannot change what goes back to
+  Feishu — only delay when that is sent. One event is processed in this order: the
+  built-in handler finishes, then your raw handlers finish one by one, and only then
+  is the response returned to Feishu. The response can only come from a built-in
+  handler; an unwrapped event type has none, so Feishu always gets "no response" —
+  `onRawEvent` cannot be used to reply to Feishu. For most event types that is
+  irrelevant, since Feishu only wants an acknowledgement. But a `card.action.trigger` response *is* what the user sees
+  after clicking (a toast, an updated card), and Feishu puts a timeout on it: a
+  raw handler that spends a few seconds on a request will make the click look failed
+  even though the built-in handler produced the right result immediately. Raw
+  handlers on that event type must return at once and leave real work to a queue.
+
 ### normalize helpers (advanced)
 
 `normalize` / `normalizeCardAction` / `normalizeReaction` / `normalizeBotAdded`
@@ -282,6 +460,17 @@ stable `code`:
 | `permission_denied` | Auth / permission failure |
 | `upload_failed` / `ssrf_blocked` | Media upload failed / URL blocked by the SSRF guard |
 | `send_timeout` / `not_connected` / `unknown` | Timeout / not connected / other |
+| `not_supported` | Unavailable in this mode (e.g. `sendMessage` on a followed meeting) |
+| `meeting_not_found` | No active meeting to follow, or the target is no longer active |
+| `too_many_sessions` | `meeting.maxConcurrentSessions` reached |
+
+On a permission failure the meeting path may attach `context.consoleUrl` — the
+signed one-click authorization link Feishu returns. **Treat it as a credential**:
+it is passed through byte for byte (re-encoding invalidates the signature) and is
+dropped entirely unless it is an `https:` URL. The SDK does not write it to a log of
+its own, but it does not scrub logs either — log hygiene, including anything
+node-sdk writes about a failed request, is the integrator's responsibility. Hand it
+to an operator; do not echo it into a chat, a UI, or a support ticket.
 
 ```ts
 try {

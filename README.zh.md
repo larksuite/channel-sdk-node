@@ -243,6 +243,103 @@ type StreamInput =
 | `reply` | `reply(target, commentId, text): Promise<void>` | 整文档评论拒绝时回退为新顶层评论 |
 | `addReaction` / `removeReaction` | `(target, replyId, emojiType = 'Typing')` | 评论表情 |
 
+### 会议通道 — `channel.joinMeeting` / `channel.followMyMeeting`
+
+两个入口分别对应用户身份与应用身份，均返回 `MeetingSession`，其事件与方法完全一致。
+
+| 方法 | 签名 | 身份 |
+|---|---|---|
+| `followMyMeeting` | `(opts: FollowMeetingOptions): Promise<MeetingSession>` | **User access token**。跟随 token 持有者当前所在的会议，会议中不出现任何机器人 |
+| `joinMeeting` | `(meetingNo: string, opts?: JoinMeetingOptions): Promise<MeetingSession>` | 应用（tenant）凭据。Bot 作为真实参会者入会 |
+| `getMeetingEventHealth` | `(): MeetingEventHealth` | 会中事件链路的诊断数据 |
+| `getRetainedMeetings` | `(): MeetingMembership[]` | Bot 仍在会中、但没有会话在监听的会议 |
+
+```ts
+// 用户身份 —— 不需要 connect()，这条路径只走 REST 轮询
+const m = await channel.followMyMeeting({
+  userAccessToken: () => myAuth.freshToken(), // 每轮轮询前现取
+  stabilizeMs: 800,                           // 一句说完再投递
+});
+
+// 应用身份 —— 需要 connect()，它依赖事件推送
+channel.on('meetingInvited', async (invite) => {
+  const m = await channel.joinMeeting(invite.meetingNo, { callId: invite.callId });
+
+  m.on('chat', async ({ content, selfEcho }) => {
+    if (selfEcho) return;                     // 见下面「自己跟自己对话」
+    await m.sendMessage(`收到:${content}`);
+  });
+});
+```
+
+| 会话事件 | 载荷 | 说明 |
+|---|---|---|
+| `transcript` | `{ actor, text, sentenceId, language, startMs, endMs, selfEcho }` | 字幕。同 `sentenceId` 的后续投递为覆盖，需要会议已开启字幕 / 转写 |
+| `chat` | `{ actor, content, messageId, messageType, sendTime, selfEcho }` | 会中聊天。Bot 自己发出的消息也会以此回流，`selfEcho` 为 `true` |
+| `participant` | `{ actor, action: 'joined' \| 'left', joinTime, leaveTime, leaveReason }` | 参会人进出。`leaveReason` 为平台原始取值 |
+| `share` | `{ actor, action: 'started' \| 'ended', shareId, doc, time }` | 文档共享开始 / 结束。文档切换会在一次推送内成对出现，顺序即语义 |
+| `documentContext` | `{ contextType, commentFocus \| sectionLocation \| elementPreview, … }` | 共享文档内的上下文变化（评论聚焦 / 章节定位 / 元素预览）。只带标识，不带正文或素材 |
+| `end` | `{ meetingId, reason }` | 会话结束。`reason` 取值见 `MeetingEndReason`：`meeting_ended` / `no_longer_active` / `idle_timeout` / `error` / `left` / `disposed` |
+| `error` | `LarkChannelError` | 会话内的错误（轮询失败、拆包异常、handler 抛错）。未注册该 handler 时降级为日志，不会打挂进程 |
+
+`session.on()` 是**多播**（与单槽的 `channel.on()` 不同）：同一事件可注册多个 handler，返回的退订函数只摘掉自己注册的那一个。
+
+| 方法 | 说明 |
+|---|---|
+| `sendMessage(text)` | 发会中消息。跟随模式下抛 `not_supported` —— Bot 并不在会议里 |
+| `leave()` | 离会并归还并发槽位，然后结束会话。幂等；**接口失败也照样完成回收**，且**会话已结束之后仍然有效** |
+| `dispose()` | 只停定时器与订阅，**不离会**。幂等 |
+| `getStats()` | 本会话按 activity 类型的解析计数 |
+
+#### 语义说明
+
+**`dispose()` 与 `leave()`** — `dispose()` 停止本会话的定时器与事件订阅，不调用任何接口，Bot 仍留在会议中。`leave()` 调用 `bots/leave` 使 Bot 退出会议、归还并发槽位，然后结束会话；在会话已结束之后（包括 `dispose()` 或 `disconnect()` 之后）仍然可以调用。`disconnect()` 对所有活跃会话执行 `dispose()`。
+
+**`disconnect()` 之后需要重新 attach** —— `disconnect()` 只 dispose 会话、不退出会议，Bot 仍留在会中；之后再 `connect()` 会重新注册事件 handler，但**不会重建会话**，这些会议的推送随即被丢弃。会话以 `reason: 'disposed'` 结束作为信号。`getRetainedMeetings()` 以 `{ meetingId, meetingNo }` 列出这些会议；用 `joinMeeting(meetingNo)` 重新 attach（对已持有的会议不占用新的并发槽位），或在拿到新会话后调 `leave()` 归还槽位。放着不处理，Bot 会一直留在会议里收不到事件、并占着槽位，直到会议结束。
+
+**`meeting.idleTimeoutMs`** — 空闲回收阈值（毫秒），默认 `0` 即关闭。设为正值时，会话在该时长内未收到任何会中活动事件即结束、调用 `bots/leave` 离会并归还槽位。仅作用于应用身份会话。
+
+**`meeting.livenessProbeIntervalMs`** — 探活间隔（毫秒），默认 `300000`。周期性确认 Bot 仍在会议中，用于覆盖不产生 `meeting_ended_v1` 的场景（被移出会议、会议转让）。仅作用于应用身份会话。
+
+**`meeting.maxConcurrentSessions`** — 并发会话上限，默认 `32`。达到上限时 `joinMeeting()` 抛 `too_many_sessions`，且不会发出 `bots/join` 请求。计数按「已入会且未离会」的会议统计，因此 `disconnect()` 不释放计数、`leave()` 才释放。
+
+**`meeting.sendRateLimitPerMinute`** — 每会话每分钟的会中消息上限，默认 `20`。超出时 `sendMessage()` 抛 `rate_limited`。
+
+**`selfEcho`** — 标记该条目由本 Bot 产生：Bot 发出的会中消息会以 `chat` 回流，其发言经会议转写后进入 `transcript`。带该标记的条目照常投递，由调用方决定是否忽略。Bot 自身 open_id 尚未解析完成时取 `true`；跟随模式下恒为 `false`。
+
+**投递顺序** — 同一次推送内的条目按数组顺序串行投递，异步 handler 的返回值会被 await 后再投递下一条。
+
+**`stabilizeMs`** — 字幕定稿防抖窗口（毫秒），默认 `0`。`0` 时每次文本变化都投递；正值时同一 `sentenceId` 在该时长内没有新内容才投递一次。同 `sentenceId` 的后续投递为覆盖语义，调用方应按其 upsert。
+
+「后续」以 `endMs` 判定，而非以到达顺序：一个会话同时从事件推送和探活的 REST 读取摄入，因此同一句话的较早、较短版本可能最后到达。定稿窗口内，`endMs` 比已持有版本更旧的投递会被忽略；相等时保持「后到者覆盖」，因为转写纠错会在不延长这句话的前提下改写文本。`stabilizeMs: 0` 时没有缓冲可比较，顺序由调用方自行处理。
+
+**`getMeetingEventHealth()`** — 按两条入站链路分别返回计数，形状为 `{ push, poll }`。两者都带 `received`（已收到的活动数）、`lastAt`，以及按 activity 类型统计的 `{ received, empty }`；`empty` 指该类型的活动拆包后条目数为 0，用于区分「平台未推送」与「已推送但未能解析」。
+
+`push` 另外带 `registered`（channel 内部的 `vc.bot.*` handler 是否已注册，由 `connect()` 置上）以及未注册时的 `reason`。`registered` 描述的是注册状态而非连接状态：WebSocket 断开重连期间它仍为 `true`。`poll` 另外带 `sessions`，即存活的跟随会话数，因此 `received: 0` 且 `sessions: 0` 表示「没有可轮询的对象」，而不是故障。
+
+两条链路分开计数，因为它们独立失效——推送停了而轮询照常工作是可能的，合成一个总数会让其中一条的流量替另一条背书。划分依据是**传输方式**而非会话身份：应用身份会话的探活走 REST 读取，因此它补读到的活动计入 `poll`。
+
+**跟随模式的可见性** — 跟随模式不入会，参会者列表中不出现机器人，同时可读取全部参会者的发言。告知参会者并取得同意由接入方负责，SDK 不代为提示。
+
+示例：[`examples/10-meeting-follow.ts`](examples/10-meeting-follow.ts)、[`examples/11-meeting-join.ts`](examples/11-meeting-join.ts)。
+
+### 未封装事件 — `channel.onRawEvent`
+
+```ts
+const off = channel.onRawEvent('vc.bot.meeting_started_v1', (payload) => { … });
+off(); // 只移除这一个 handler
+```
+
+**这个 API 做什么** — 按飞书事件类型名注册一个回调，回调拿到的是解密后的原始事件 payload（平台发来的样子）。同一个事件类型可以注册多个回调，彼此不覆盖；返回值用于移除刚注册的那一个。
+
+**它解决什么问题** — channel 只封装了固定几类事件：IM 消息、卡片回调、表情回复、机器人入群、云文档评论，以及会议通道所依赖的三个会议推送（`vc.bot.meeting_invited_v1`、`_activity_v1`、`_ended_v1`）。其余类型 —— 审批、日历、通讯录变更，以及上面示例里的 `vc.bot.meeting_started_v1` —— 都没有自己的入口。两种绕法都不好：直接写 dispatcher 的私有 handler map，版本一升就坏；为同一个应用再开一条长连接，飞书会把事件在两条连接之间分流投递，channel 自己的 IM 消息就会时有时无。`onRawEvent` 让这些事件类型走 channel 已经持有的那条连接。
+
+**需要关注的副作用** — 回调收到的是**未经处理**的事件，channel 的入站防护对它不生效。验签与解密仍然会做（那在更前面一层），但归一化之后的每一步都跳过了：`PolicyGate`（`dmMode` / `dmAllowlist` / `groupAllowlist` / `requireMention`）、去重、按 chat 串行的处理锁、防回环、过期事件丢弃。具体来说：
+
+- 给 channel **已经封装**的事件类型注册 raw handler，等于为它开了第二条不设防的入口。最需要留意的是 `im.message.receive_v1`：内建路径上被白名单拒掉的消息，raw handler 照样收得到。
+- payload 不做脱敏，也不受 `includeRawEvent: false` 影响 —— 里面有 `tenant_key`、完整用户 ID、消息原文。要打日志或转发给第三方，得自己处理。
+- raw handler 是纯观察者：它的返回值一律被丢弃（签名即 `=> void | Promise<void>`），因此改不了回给飞书的内容，但会推迟这个内容发出的时间。一次事件的处理顺序是：内建 handler 跑完 → 你的 raw handler 逐个跑完 → 才向飞书返回响应。响应内容只可能来自内建 handler；未封装的事件类型没有内建 handler，回给飞书的就固定是"无响应"—— 也就是说 `onRawEvent` 无法用来给飞书回内容。多数事件类型不受影响（飞书只要一个确认）。但 `card.action.trigger` 的响应内容就是用户点按钮后看到的结果（如 toast、卡片更新），飞书对它有超时限制 —— raw handler 里做一次耗时几秒的请求，内建 handler 早就把正确结果算好了，也会因为迟迟发不出去而让用户看到操作失败。所以这个事件类型上的 raw handler 要立即返回，真正的活儿交给队列异步做。
+
 ### normalize 工具函数（高级）
 
 `normalize` / `normalizeCardAction` / `normalizeReaction` / `normalizeBotAdded` / `normalizeComment` —— 把原始 Feishu 事件载荷归一化，供自定义传输或单测使用。`normalize` 必返回结果；其余 4 个在缺少必需身份字段时返回 `null`。
@@ -259,6 +356,11 @@ type StreamInput =
 | `permission_denied` | 权限 / 鉴权失败 |
 | `upload_failed` / `ssrf_blocked` | 媒体上传失败 / URL 被 SSRF 拦截 |
 | `send_timeout` / `not_connected` / `unknown` | 超时 / 未连接 / 其它 |
+| `not_supported` | 当前模式下不可用（如对「跟随」的会议调 `sendMessage`） |
+| `meeting_not_found` | 没有可跟随的活跃会议，或目标会议已不活跃 |
+| `too_many_sessions` | 达到 `meeting.maxConcurrentSessions` |
+
+权限不足时，会议链路可能在 `context.consoleUrl` 上带回飞书返回的**带签名一键授权链接**。**请当凭据对待**：它逐字节原样透传（重新编码会让签名失效），非 `https:` 取值会被直接丢弃。SDK 自身不会把它写进日志，但也不清洗日志 —— 日志安全（含 node-sdk 对失败请求写出的内容）由接入方负责。把它交给运维，不要回显到聊天、前端或工单里。
 
 ```ts
 try {
