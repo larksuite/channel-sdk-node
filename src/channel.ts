@@ -208,6 +208,7 @@ export class LarkChannel {
         const handler = this.handlers.message;
         if (handler) await handler(merged);
       },
+      onError: (error) => this.emitError(error),
     });
   }
 

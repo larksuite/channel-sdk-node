@@ -37,6 +37,7 @@ export interface SafetyPipelineOptions {
   logger: Logger;
   onReject: OnReject;
   onMessage: OnMessageDispatch;
+  onError?: (error: unknown) => void;
 }
 
 /**
@@ -59,21 +60,26 @@ export class SafetyPipeline {
   private readonly logger: Logger;
   private readonly onReject: OnReject;
   private readonly onMessage: OnMessageDispatch;
+  private readonly onError?: (error: unknown) => void;
 
   constructor(opts: SafetyPipelineOptions) {
     this.logger = opts.logger;
     this.onReject = opts.onReject;
     this.onMessage = opts.onMessage;
+    this.onError = opts.onError;
 
     this.staleWindow = opts.config?.staleMessageWindowMs ?? DEFAULT_STALE_MS;
     this.queueEnabled = opts.config?.chatQueue?.enabled ?? true;
 
+    this.lock = new ProcessingLock(
+      opts.config?.processingLock?.ttlMs,
+      opts.config?.processingLock?.renewIntervalMs,
+    );
     this.seenCache = new SeenCache(opts.cache, {
       ttlMs: opts.config?.dedup?.ttl,
       maxMemEntries: opts.config?.dedup?.maxEntries,
       sweepMs: opts.config?.dedup?.sweepIntervalMs,
     });
-    this.lock = new ProcessingLock();
     this.policy = new PolicyGate(opts.policy, opts.botIdentity, opts.logger);
     this.loopGuard = new LoopGuard(opts.policy?.botLoopGuard, opts.logger);
     this.manager = new ChatPipelineManager(resolveBatchConfig(opts.config));
@@ -128,8 +134,14 @@ export class SafetyPipeline {
         await this.onMessage(batch.message);
       } catch (e) {
         this.logger.error?.(`safety: message handler threw`, e);
+        try {
+          this.onError?.(e);
+        } catch (observerError) {
+          this.logger.error?.(`safety: error observer threw`, observerError);
+        }
       } finally {
         for (const id of batch.sourceIds) {
+          this.lock.stopRenewal(id);
           try {
             await this.seenCache.add(id);
           } catch {
@@ -175,6 +187,7 @@ export class SafetyPipeline {
         this.logger.error?.(`safety: action handler threw`, e);
         return undefined;
       } finally {
+        this.lock.stopRenewal(eventId);
         try {
           await this.seenCache.add(eventId);
         } catch {

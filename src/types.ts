@@ -450,6 +450,12 @@ export interface SafetyConfig {
     maxEntries?: number;
     sweepIntervalMs?: number;
   };
+  processingLock?: {
+    /** How long an in-flight lease remains valid without renewal. */
+    ttlMs?: number;
+    /** How often an active lease is renewed. Must be less than `ttlMs`. */
+    renewIntervalMs?: number;
+  };
   chatQueue?: {
     enabled?: boolean;
     /**

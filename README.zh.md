@@ -103,7 +103,7 @@ const channel = createLarkChannel({ appId: client_id, appSecret: client_secret }
 
 `PolicyConfig`：`requireMention` · `dmMode`（`'open' \| 'allowlist' \| 'pair' \| 'disabled'`）· `dmAllowlist` · `groupAllowlist` · `respondToMentionAll` · `botLoopGuard`（见 [Bot-at-bot](#bot-at-bot)）。`dmAllowlist` 填**发送方 id**（`ou_…` / user_id / union_id），`groupAllowlist` 填**群 id**（`oc_…`）——应用 id（`cli_…`）两者都不属于，填了会告警。
 
-`SafetyConfig`：`dedup`（`ttl`/`maxEntries`/`sweepIntervalMs`）· `chatQueue`（`enabled`、`mergeWhileBusy`）· `batch.text` / `batch.media` · `staleMessageWindowMs`。
+`SafetyConfig`：`dedup`（`ttl`/`maxEntries`/`sweepIntervalMs`）· `processingLock`（`ttlMs`/`renewIntervalMs`）· `chatQueue`（`enabled`、`mergeWhileBusy`）· `batch.text` / `batch.media` · `staleMessageWindowMs`。
 
 ### 生命周期
 
