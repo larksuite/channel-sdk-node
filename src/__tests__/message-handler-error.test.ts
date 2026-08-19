@@ -19,6 +19,12 @@ function directMessage(messageId: string): unknown {
   };
 }
 
+async function flushEventLoop(): Promise<void> {
+  await flushMicrotasks();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await flushMicrotasks();
+}
+
 describe.each([
   ['queue disabled', false],
   ['queue enabled', true],
@@ -68,8 +74,74 @@ test('a throwing error observer cannot break handler cleanup', async () => {
     logger.error.mock.calls.some(
       ([entry]) =>
         Array.isArray(entry) &&
-        entry[0] === 'safety: error observer threw' &&
+        entry[0] === 'channel: error handler threw' &&
         entry[1]?.message === 'observer exploded',
+    ),
+  ).toBe(true);
+});
+
+test('an async rejecting error observer is consumed without unhandledRejection', async () => {
+  const { ch, logger } = createTestChannel({ safety: { chatQueue: { enabled: false } } });
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => unhandled.push(reason);
+  let handlerCalls = 0;
+  let observerCalls = 0;
+  process.on('unhandledRejection', onUnhandled);
+
+  try {
+    markConnected(ch);
+    ch.on('error', async () => {
+      observerCalls++;
+      throw new Error('async observer exploded');
+    });
+    ch.on('message', async () => {
+      handlerCalls++;
+      if (handlerCalls === 1) throw new Error('first message exploded');
+    });
+
+    await dispatchEvent(ch, 'im.message.receive_v1', directMessage('om_async_observer_1'));
+    await flushEventLoop();
+    await dispatchEvent(ch, 'im.message.receive_v1', directMessage('om_async_observer_2'));
+    await flushEventLoop();
+
+    expect(observerCalls).toBe(1);
+    expect(handlerCalls).toBe(2);
+    expect(unhandled).toEqual([]);
+    expect(
+      logger.error.mock.calls.some(
+        ([entry]) =>
+          Array.isArray(entry) &&
+          entry[0] === 'channel: error handler threw' &&
+          entry[1]?.message === 'async observer exploded',
+      ),
+    ).toBe(true);
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
+});
+
+test('a throwing thenable returned by the error observer is isolated', async () => {
+  const { ch, logger } = createTestChannel({ safety: { chatQueue: { enabled: false } } });
+  markConnected(ch);
+  ch.on('error', (() =>
+    Object.defineProperty({}, 'then', {
+      get() {
+        throw new Error('then getter exploded');
+      },
+    })) as never);
+  ch.on('message', async () => {
+    throw new Error('message handler exploded');
+  });
+
+  await dispatchEvent(ch, 'im.message.receive_v1', directMessage('om_thenable_observer'));
+  await flushEventLoop();
+
+  expect(
+    logger.error.mock.calls.some(
+      ([entry]) =>
+        Array.isArray(entry) &&
+        entry[0] === 'channel: error handler threw' &&
+        entry[1]?.message === 'then getter exploded',
     ),
   ).toBe(true);
 });

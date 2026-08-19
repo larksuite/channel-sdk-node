@@ -119,6 +119,14 @@ the QR URL as `source/<name>` (passed through as-is, not defaulted).
 
 `SafetyConfig`: `dedup` (`ttl`/`maxEntries`/`sweepIntervalMs`) · `processingLock` (`ttlMs`/`renewIntervalMs`) · `chatQueue` (`enabled`, `mergeWhileBusy`) · `batch.text` / `batch.media` · `staleMessageWindowMs`.
 
+`processingLock` defaults to a 300,000 ms TTL and a 60,000 ms renewal interval. Both
+values must be integer milliseconds from 1 through 2,147,483,647, and
+`renewIntervalMs` must be less than `ttlMs`. If only `ttlMs` is overridden, the
+renewal interval is derived as the smaller of 60,000 ms and one third of the TTL
+(rounded down, with a 1 ms minimum). Lease ownership is token-bound: an active or
+finalizing handler cannot be displaced merely because wall-clock time has passed
+its TTL.
+
 ### Lifecycle
 
 | Method | Signature | Description |

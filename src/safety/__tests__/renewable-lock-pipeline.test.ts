@@ -9,6 +9,8 @@ const logger = {
   trace: vi.fn(),
 } as any;
 
+afterEach(() => vi.useRealTimers());
+
 function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void;
   const promise = new Promise<void>((done) => {
@@ -77,12 +79,119 @@ test('handler pending across two ttl periods retains lock, then marks seen and r
   gate.resolve();
   await wait(0);
   expect(values.has('om_renew')).toBe(true);
-  expect((pipeline as any).lock.acquire('om_renew')).toBe(true);
-  (pipeline as any).lock.release('om_renew');
+  const reacquired = (pipeline as any).lock.acquire('om_renew');
+  expect(reacquired).toBeDefined();
+  (pipeline as any).lock.release(reacquired);
 
   await pipeline.pushMessage(message('om_renew'));
   await wait(0);
   expect(handlerCalls).toBe(1);
+  await pipeline.dispose();
+});
+
+test('event-loop stall beyond ttl cannot create a second handler lease', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(1_000);
+  const gate = deferred();
+  const { cache } = makeCache();
+  let handlerCalls = 0;
+  const pipeline = new SafetyPipeline({
+    cache,
+    logger,
+    onReject: () => {},
+    onMessage: async () => {
+      handlerCalls++;
+      await gate.promise;
+    },
+    config: {
+      chatQueue: { enabled: false },
+      processingLock: { ttlMs: 20, renewIntervalMs: 5 },
+    },
+  });
+
+  await pipeline.pushMessage(message('om_stalled'));
+  await Promise.resolve();
+  expect(handlerCalls).toBe(1);
+
+  // Move wall clock beyond the lease TTL without executing any timer callback.
+  vi.setSystemTime(2_000);
+  await pipeline.pushMessage(message('om_stalled'));
+  expect(handlerCalls).toBe(1);
+
+  gate.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  await pipeline.dispose();
+  vi.useRealTimers();
+});
+
+test('batching carries each source exact lease through cleanup', async () => {
+  const { cache } = makeCache();
+  const markSeen = vi.spyOn(cache, 'set');
+  const pipeline = new SafetyPipeline({
+    cache,
+    logger,
+    onReject: () => {},
+    onMessage: async () => {},
+    config: {
+      chatQueue: { enabled: true },
+      batch: { text: { delayMs: 10_000, maxMessages: 2 } },
+      processingLock: { ttlMs: 50, renewIntervalMs: 10 },
+    },
+  });
+  const lock = (pipeline as any).lock;
+  const acquire = vi.spyOn(lock, 'acquire');
+  const stopRenewal = vi.spyOn(lock, 'stopRenewal');
+  const release = vi.spyOn(lock, 'release');
+
+  await pipeline.pushMessage(message('om_batch_1'));
+  await pipeline.pushMessage(message('om_batch_2'));
+  await (pipeline as any).manager.flushAll();
+
+  const firstLease = acquire.mock.results[0].value;
+  const secondLease = acquire.mock.results[1].value;
+  expect(stopRenewal.mock.calls[0][0]).toBe(firstLease);
+  expect(stopRenewal.mock.calls[1][0]).toBe(secondLease);
+  expect(release.mock.calls[0][0]).toBe(firstLease);
+  expect(release.mock.calls[1][0]).toBe(secondLease);
+  expect(stopRenewal.mock.invocationCallOrder[0]).toBeLessThan(
+    markSeen.mock.invocationCallOrder[0],
+  );
+  expect(markSeen.mock.invocationCallOrder[0]).toBeLessThan(release.mock.invocationCallOrder[0]);
+  expect(stopRenewal.mock.invocationCallOrder[1]).toBeLessThan(
+    markSeen.mock.invocationCallOrder[1],
+  );
+  expect(markSeen.mock.invocationCallOrder[1]).toBeLessThan(release.mock.invocationCallOrder[1]);
+  await pipeline.dispose();
+});
+
+test('pushAction finalizes and releases the exact acquired lease', async () => {
+  const { cache } = makeCache();
+  const markSeen = vi.spyOn(cache, 'set');
+  const pipeline = new SafetyPipeline({
+    cache,
+    logger,
+    onReject: () => {},
+    onMessage: async () => {},
+    config: {
+      chatQueue: { enabled: false },
+      processingLock: { ttlMs: 50, renewIntervalMs: 10 },
+    },
+  });
+  const lock = (pipeline as any).lock;
+  const acquire = vi.spyOn(lock, 'acquire');
+  const stopRenewal = vi.spyOn(lock, 'stopRenewal');
+  const release = vi.spyOn(lock, 'release');
+
+  await pipeline.pushAction('action_exact', 'oc_action', async () => 'ok');
+
+  const lease = acquire.mock.results[0].value;
+  expect(stopRenewal.mock.calls[0][0]).toBe(lease);
+  expect(release.mock.calls[0][0]).toBe(lease);
+  expect(stopRenewal.mock.invocationCallOrder[0]).toBeLessThan(
+    markSeen.mock.invocationCallOrder[0],
+  );
+  expect(markSeen.mock.invocationCallOrder[0]).toBeLessThan(release.mock.invocationCallOrder[0]);
   await pipeline.dispose();
 });
 
@@ -104,6 +213,10 @@ test('lease stays renewable while a queued message waits behind another handler'
       processingLock: { ttlMs: 20, renewIntervalMs: 5 },
     },
   });
+  const lock = (pipeline as any).lock;
+  const acquire = vi.spyOn(lock, 'acquire');
+  const stopRenewal = vi.spyOn(lock, 'stopRenewal');
+  const release = vi.spyOn(lock, 'release');
 
   await pipeline.pushMessage(message('om_first'));
   await pipeline.pushMessage(message('om_waiting'));
@@ -114,6 +227,12 @@ test('lease stays renewable while a queued message waits behind another handler'
   firstGate.resolve();
   await (pipeline as any).manager.flushAll();
   expect(handled).toEqual(['om_first', 'om_waiting']);
+  const firstLease = acquire.mock.results[0].value;
+  const waitingLease = acquire.mock.results[1].value;
+  expect(stopRenewal.mock.calls[0][0]).toBe(firstLease);
+  expect(stopRenewal.mock.calls[1][0]).toBe(waitingLease);
+  expect(release.mock.calls[0][0]).toBe(firstLease);
+  expect(release.mock.calls[1][0]).toBe(waitingLease);
   await pipeline.dispose();
 });
 
@@ -121,6 +240,11 @@ test.each([
   { ttlMs: 0, renewIntervalMs: 1 },
   { ttlMs: 20, renewIntervalMs: 0 },
   { ttlMs: 20, renewIntervalMs: 20 },
+  { ttlMs: 20.5, renewIntervalMs: 5 },
+  { ttlMs: 20, renewIntervalMs: 5.5 },
+  { ttlMs: Number.POSITIVE_INFINITY, renewIntervalMs: 5 },
+  { ttlMs: 2_147_483_648, renewIntervalMs: 5 },
+  { ttlMs: 2_147_483_647, renewIntervalMs: 2_147_483_648 },
 ])('SafetyConfig rejects invalid processing lock config: %o', (processingLock) => {
   const { cache } = makeCache();
   expect(

@@ -1,8 +1,14 @@
 import { DEFAULT_LOCK_RENEW_INTERVAL_MS, DEFAULT_LOCK_TTL_MS } from './types';
 
+export interface ProcessingLease {
+  readonly id: string;
+  readonly ownerToken: symbol;
+}
+
 interface LockEntry {
+  lease: ProcessingLease;
   expiresAt: number;
-  renewable: boolean;
+  state: 'active' | 'finalizing';
 }
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
@@ -10,7 +16,8 @@ const MAX_TIMER_DELAY_MS = 2_147_483_647;
 /**
  * Short-TTL in-memory lock to prevent concurrent processing of the same
  * event — complements SeenCache by covering the "currently in flight"
- * window, during which the event is not yet committed to SeenCache.
+ * window, during which the event is not yet committed to SeenCache. TTL is a
+ * renewal deadline, never authority to steal an active or finalizing owner.
  */
 export class ProcessingLock {
   private readonly locks = new Map<string, LockEntry>();
@@ -20,10 +27,10 @@ export class ProcessingLock {
 
   constructor(
     ttlMs: number = DEFAULT_LOCK_TTL_MS,
-    renewIntervalMs: number = Math.min(DEFAULT_LOCK_RENEW_INTERVAL_MS, ttlMs / 3),
+    renewIntervalMs: number = defaultRenewInterval(ttlMs),
   ) {
     assertDuration('processingLock.ttlMs', ttlMs);
-    assertDuration('processingLock.renewIntervalMs', renewIntervalMs, MAX_TIMER_DELAY_MS);
+    assertDuration('processingLock.renewIntervalMs', renewIntervalMs);
     if (renewIntervalMs >= ttlMs) {
       throw new RangeError('processingLock.renewIntervalMs must be less than processingLock.ttlMs');
     }
@@ -35,25 +42,30 @@ export class ProcessingLock {
    * Acquire a renewable lease. The lease remains live until `stopRenewal` is
    * called, even when its handler is waiting in a queue or batch.
    */
-  acquire(id: string): boolean {
+  acquire(id: string): ProcessingLease | undefined {
     const now = Date.now();
-    const current = this.locks.get(id);
-    if (current && current.expiresAt > now) return false;
-    this.locks.set(id, { expiresAt: now + this.ttlMs, renewable: true });
+    if (this.locks.has(id)) return undefined;
+    const lease = Object.freeze({ id, ownerToken: Symbol(id) });
+    this.locks.set(id, { lease, expiresAt: now + this.ttlMs, state: 'active' });
     this.ensureRenewalTimer();
-    return true;
+    return lease;
   }
 
   /** Stop extending a lease while leaving it held until explicit release. */
-  stopRenewal(id: string): void {
-    const entry = this.locks.get(id);
-    if (entry) entry.renewable = false;
+  stopRenewal(lease: ProcessingLease): void {
+    const entry = this.currentEntry(lease);
+    if (entry) entry.state = 'finalizing';
     this.stopTimerIfIdle();
   }
 
-  release(id: string): void {
-    this.locks.delete(id);
+  release(lease: ProcessingLease): void {
+    if (this.currentEntry(lease)) this.locks.delete(lease.id);
     this.stopTimerIfIdle();
+  }
+
+  private currentEntry(lease: ProcessingLease): LockEntry | undefined {
+    const entry = this.locks.get(lease.id);
+    return entry?.lease.ownerToken === lease.ownerToken ? entry : undefined;
   }
 
   private ensureRenewalTimer(): void {
@@ -64,9 +76,8 @@ export class ProcessingLock {
 
   private renew(): void {
     const now = Date.now();
-    for (const [id, entry] of this.locks) {
-      if (entry.renewable) entry.expiresAt = now + this.ttlMs;
-      else if (entry.expiresAt <= now) this.locks.delete(id);
+    for (const entry of this.locks.values()) {
+      if (entry.state === 'active') entry.expiresAt = now + this.ttlMs;
     }
     this.stopTimerIfIdle();
   }
@@ -74,7 +85,7 @@ export class ProcessingLock {
   private stopTimerIfIdle(): void {
     if (!this.renewalTimer) return;
     for (const entry of this.locks.values()) {
-      if (entry.renewable) return;
+      if (entry.state === 'active') return;
     }
     clearInterval(this.renewalTimer);
     this.renewalTimer = undefined;
@@ -87,8 +98,14 @@ export class ProcessingLock {
   }
 }
 
-function assertDuration(name: string, value: number, max = Number.MAX_SAFE_INTEGER): void {
-  if (!Number.isFinite(value) || value < 1 || value > max) {
-    throw new RangeError(`${name} must be between 1 and ${max} milliseconds`);
+function defaultRenewInterval(ttlMs: number): number {
+  return Math.min(DEFAULT_LOCK_RENEW_INTERVAL_MS, Math.max(1, Math.floor(ttlMs / 3)));
+}
+
+function assertDuration(name: string, value: number): void {
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_TIMER_DELAY_MS) {
+    throw new RangeError(
+      `${name} must be a safe integer between 1 and ${MAX_TIMER_DELAY_MS} milliseconds`,
+    );
   }
 }

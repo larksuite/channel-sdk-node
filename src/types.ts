@@ -171,7 +171,7 @@ export interface EventMap {
   reaction: (evt: ReactionEvent) => void;
   botAdded: (evt: BotAddedEvent) => void;
   comment: (evt: CommentEvent) => void | Promise<void>;
-  error: (err: LarkChannelError) => void;
+  error: (err: LarkChannelError) => void | Promise<void>;
   reconnecting: () => void;
   reconnected: () => void;
 }
@@ -451,9 +451,16 @@ export interface SafetyConfig {
     sweepIntervalMs?: number;
   };
   processingLock?: {
-    /** How long an in-flight lease remains valid without renewal. */
+    /**
+     * Lease TTL in integer milliseconds (1..2,147,483,647). Defaults to
+     * 300,000. Wall-clock expiry never lets a competing owner steal an active
+     * or finalizing lease.
+     */
     ttlMs?: number;
-    /** How often an active lease is renewed. Must be less than `ttlMs`. */
+    /**
+     * Renewal interval in integer milliseconds (1..2,147,483,647). Defaults
+     * to 60,000 with the default TTL and must be less than `ttlMs`.
+     */
     renewIntervalMs?: number;
   };
   chatQueue?: {

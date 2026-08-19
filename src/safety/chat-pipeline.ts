@@ -1,4 +1,5 @@
 import type { MentionInfo, NormalizedMessage, ResourceDescriptor } from '../types';
+import type { ProcessingLease } from './processing-lock';
 import type { BatchConfig, BatchedDispatch } from './types';
 
 type FlushHandler = (batch: BatchedDispatch) => Promise<void>;
@@ -15,7 +16,7 @@ type FlushHandler = (batch: BatchedDispatch) => Promise<void>;
  *                          pending batch and previous tasks
  */
 export class ChatPipeline {
-  private buffer: NormalizedMessage[] = [];
+  private buffer: Array<{ message: NormalizedMessage; lease: ProcessingLease }> = [];
   private bufferChars = 0;
   private timer?: NodeJS.Timeout;
   private tail: Promise<void> = Promise.resolve();
@@ -28,8 +29,8 @@ export class ChatPipeline {
     private serialOnly: boolean,
   ) {}
 
-  push(msg: NormalizedMessage, handler: FlushHandler): void {
-    this.buffer.push(msg);
+  push(msg: NormalizedMessage, lease: ProcessingLease, handler: FlushHandler): void {
+    this.buffer.push({ message: msg, lease });
     this.bufferChars += msg.content.length;
     this.pendingHandler ??= handler;
 
@@ -117,8 +118,8 @@ export class ChatPipeline {
     if (!handler) return;
 
     const dispatch: BatchedDispatch = {
-      message: mergeBatch(batch),
-      sourceIds: batch.map((m) => m.messageId),
+      message: mergeBatch(batch.map((source) => source.message)),
+      sources: batch.map(({ message, lease }) => ({ messageId: message.messageId, lease })),
     };
 
     this.busy = true;
@@ -149,8 +150,8 @@ export class ChatPipelineManager {
 
   constructor(private config: BatchConfig) {}
 
-  push(scope: string, msg: NormalizedMessage, handler: FlushHandler): void {
-    this.getOrCreate(scope, false).push(msg, handler);
+  push(scope: string, msg: NormalizedMessage, lease: ProcessingLease, handler: FlushHandler): void {
+    this.getOrCreate(scope, false).push(msg, lease, handler);
   }
 
   run<T>(scope: string, task: () => Promise<T>): Promise<T> {
