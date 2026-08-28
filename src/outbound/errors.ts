@@ -19,13 +19,18 @@ function inferCode(err: unknown): LarkChannelErrorCode {
   const raw = err as any;
   const status = raw?.response?.status ?? raw?.status;
   const feishuCode = raw?.response?.data?.code ?? raw?.data?.code ?? raw?.code;
-  const msg = String(raw?.message ?? '').toLowerCase();
+  const msg = extractMessage(err).toLowerCase();
 
   if (typeof feishuCode === 'number') {
     if (feishuCode === 230020 || feishuCode === 230017) return 'target_revoked';
     if (feishuCode === 99991400 || feishuCode === 99991401) return 'permission_denied';
     if (feishuCode === 230002 || feishuCode === 230001) return 'format_error';
   }
+
+  // Feishu can return HTTP 400 without a numeric platform code when the
+  // message targeted by a reply has already been withdrawn. Classify the
+  // platform message before the generic HTTP 400 fallback.
+  if (/\bmessage\b.*\b(withdrawn|recalled)\b/.test(msg)) return 'target_revoked';
 
   if (status === 429) return 'rate_limited';
   if (status === 401 || status === 403) return 'permission_denied';

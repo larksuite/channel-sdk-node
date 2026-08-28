@@ -28,6 +28,27 @@ describe('classifyError', () => {
     expect(err.code).toBe('target_revoked');
   });
 
+  test('infers target_revoked from a withdrawn-message response without a Feishu code', () => {
+    const err = classifyError({
+      response: {
+        status: 400,
+        data: { message: 'The message was withdrawn.' },
+      },
+    });
+    expect(err.code).toBe('target_revoked');
+    expect(err.message).toBe('The message was withdrawn.');
+  });
+
+  test('does not classify an unrelated HTTP 400 as target_revoked', () => {
+    const err = classifyError({
+      response: {
+        status: 400,
+        data: { message: 'Invalid message format.' },
+      },
+    });
+    expect(err.code).toBe('format_error');
+  });
+
   test('detects ssrf_blocked from error message prefix', () => {
     const err = classifyError(new Error('ssrf_blocked: 10.0.0.1'));
     expect(err.code).toBe('ssrf_blocked');
