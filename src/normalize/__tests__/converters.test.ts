@@ -207,6 +207,26 @@ describe('post converter', () => {
     expect(r.content.indexOf('<file key="file_a"')).toBeGreaterThan(r.content.indexOf('正文'));
   });
 
+  test('attachment zone adds to, and does not replace, body resources', async () => {
+    // The body's own resources and the attachment zone's must coexist.
+    const raw = JSON.stringify({
+      zh_cn: {
+        content: [
+          [
+            { tag: 'img', image_key: 'img_1' },
+            { tag: 'media', file_key: 'media_1' },
+          ],
+        ],
+      },
+      files: [{ file_key: 'file_a', file_name: 'report.pdf' }],
+    });
+    const r = await convertPost(raw, ctx);
+    expect(r.resources).toContainEqual({ type: 'image', fileKey: 'img_1' });
+    expect(r.resources).toContainEqual({ type: 'file', fileKey: 'media_1' });
+    expect(r.resources).toContainEqual({ type: 'file', fileKey: 'file_a', fileName: 'report.pdf' });
+    expect(r.resources).toHaveLength(3);
+  });
+
   test('attachment zone survives an unusable locale document', async () => {
     // `files` is a sibling of the locale documents, so attachments must still
     // surface when no locale document can be unwrapped.

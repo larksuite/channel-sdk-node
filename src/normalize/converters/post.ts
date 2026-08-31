@@ -20,13 +20,15 @@ interface PostAttachment {
   isFolder: boolean;
 }
 
+const placeholder = '[rich text message]';
+
 const atMentionRe = /<at(\s+)user_id(\s*)=(\s*)"(.*?)">(.*?)<\/at>/g;
 const imageKeyRe = /!\[(.*?)\]\(([^)]+)\)/g;
 
 export const convertPost: ContentConverterFn = async (raw, ctx) => {
   const rawParsed = safeParse(raw);
   if (rawParsed == null || typeof rawParsed !== 'object') {
-    return { content: '[rich text message]', resources: [] };
+    return { content: placeholder, resources: [] };
   }
 
   // The attachment zone is a sibling of the locale documents, not part of one,
@@ -36,7 +38,7 @@ export const convertPost: ContentConverterFn = async (raw, ctx) => {
 
   const body = unwrapLocale<PostBody>(rawParsed as Record<string, unknown>);
   if (!body && attachments.length === 0) {
-    return { content: '[rich text message]', resources: [] };
+    return { content: placeholder, resources: [] };
   }
 
   // Choose source paragraphs: prefer content_v2, fallback to content.
@@ -60,11 +62,8 @@ export const convertPost: ContentConverterFn = async (raw, ctx) => {
     lines.push(line);
   }
 
-  // Attachment zone: the top-level `files` array of a post message, outside
-  // any locale document. Files render as <file .../> (same tag style as the
-  // standalone file converter) and are surfaced as downloadable resources;
-  // folders render as <folder .../> tags only (mirrors the standalone folder
-  // converter, resources=[]).
+  // Attachment zone: files render as <file .../> and are downloadable; folders
+  // render as <folder .../> tags only, mirroring the standalone converters.
   for (const att of attachments) {
     // Both key and name are escaped: downstream parses these tags as structured
     // info, so a quote inside a key must not be able to forge an extra attribute.
@@ -76,7 +75,7 @@ export const convertPost: ContentConverterFn = async (raw, ctx) => {
     }
   }
 
-  const content = lines.join('\n').trim() || '[rich text message]';
+  const content = lines.join('\n').trim() || placeholder;
   return { content, resources };
 };
 
