@@ -180,4 +180,56 @@ describe('post converter', () => {
     const r = await convertPost('not json', ctx);
     expect(r.content).toBe('[rich text message]');
   });
+
+  test('attachment zone renders files and folders', async () => {
+    const raw = JSON.stringify({
+      zh_cn: {
+        title: '报告',
+        content: [[{ tag: 'text', text: '正文' }]],
+      },
+      files: [
+        { file_key: 'file_a', file_name: 'report.pdf' },
+        { file_key: 'file_b' },
+        { file_key: 'dir_1', file_name: 'assets', is_folder: true },
+      ],
+    });
+    const r = await convertPost(raw, ctx);
+    expect(r.content).toContain('**报告**');
+    expect(r.content).toContain('正文');
+    expect(r.content).toContain('<file key="file_a" name="report.pdf"/>');
+    expect(r.content).toContain('<file key="file_b"/>');
+    expect(r.content).toContain('<folder key="dir_1" name="assets"/>');
+    // Files are downloadable resources; folders are tag-only.
+    expect(r.resources).toContainEqual({ type: 'file', fileKey: 'file_a', fileName: 'report.pdf' });
+    expect(r.resources).toContainEqual({ type: 'file', fileKey: 'file_b', fileName: undefined });
+    expect(r.resources.filter((x) => x.type === 'file').length).toBe(2);
+  });
+
+  test('attachment zone ignores empty files array', async () => {
+    const raw = JSON.stringify({
+      zh_cn: { content: [[{ tag: 'text', text: 'hi' }]] },
+      files: [],
+    });
+    const r = await convertPost(raw, ctx);
+    expect(r.content).toContain('hi');
+    expect(r.content).not.toContain('<file');
+    expect(r.resources).toEqual([]);
+  });
+
+  test('attachment zone escapes key and handles non-string name', async () => {
+    const raw = JSON.stringify({
+      zh_cn: { content: [[{ tag: 'text', text: 'hi' }]] },
+      files: [
+        { file_key: 'file_a" onmouseover="x', file_name: 'r.pdf' },
+        { file_key: 'file_b', file_name: 123 as unknown },
+      ],
+    });
+    const r = await convertPost(raw, ctx);
+    // key with a quote is escaped so it cannot forge attributes
+    expect(r.content).toContain('<file key="file_a&quot; onmouseover=&quot;x" name="r.pdf"/>');
+    // non-string file_name degrades to no name attribute, no throw
+    expect(r.content).toContain('<file key="file_b"/>');
+    expect(r.resources).toContainEqual({ type: 'file', fileKey: 'file_a" onmouseover="x', fileName: 'r.pdf' });
+    expect(r.resources).toContainEqual({ type: 'file', fileKey: 'file_b', fileName: undefined });
+  });
 });

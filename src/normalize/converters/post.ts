@@ -1,11 +1,17 @@
 import type { ResourceDescriptor } from '../../types';
 import type { ContentConverterFn, ConvertContext, PostElement } from '../context';
-import { applyStyle, safeParse, unwrapLocale } from '../utils';
+import { applyStyle, escapeAttr, safeParse, unwrapLocale } from '../utils';
 
 interface PostBody {
   title?: string;
   content?: PostElement[][];
   content_v2?: PostElement[][];
+}
+
+interface PostAttachment {
+  file_key?: string;
+  file_name?: string;
+  is_folder?: boolean;
 }
 
 const atMentionRe = /<at(\s+)user_id(\s*)=(\s*)"(.*?)">(.*?)<\/at>/g;
@@ -41,9 +47,44 @@ export const convertPost: ContentConverterFn = async (raw, ctx) => {
     lines.push(line);
   }
 
+  // Attachment zone: the top-level `files` array of a post message, outside
+  // any locale document. Files render as <file .../> (same tag style as the
+  // standalone file converter) and are surfaced as downloadable resources;
+  // folders render as <folder .../> tags only (mirrors the standalone folder
+  // converter, resources=[]).
+  const attachments = topLevelAttachments(rawParsed as Record<string, unknown>);
+  for (const att of attachments) {
+    const key = att.file_key ?? '';
+    if (!key) continue;
+    // Both key and name are escaped: downstream parses these tags as
+    // structured info, so a quote inside a key must not be able to forge an
+    // extra attribute. Non-string file_name degrades to no name attribute.
+    const name = typeof att.file_name === 'string' ? att.file_name : '';
+    const nameAttr = name ? ` name="${escapeAttr(name)}"` : '';
+    if (att.is_folder) {
+      lines.push(`<folder key="${escapeAttr(key)}"${nameAttr}/>`);
+    } else {
+      lines.push(`<file key="${escapeAttr(key)}"${nameAttr}/>`);
+      resources.push({ type: 'file', fileKey: key, fileName: name || undefined });
+    }
+  }
+
   const content = lines.join('\n').trim() || '[rich text message]';
   return { content, resources };
 };
+
+/** Extract the top-level attachment-zone entries of a post message. */
+function topLevelAttachments(parsed: Record<string, unknown>): PostAttachment[] {
+  const files = parsed.files;
+  if (!Array.isArray(files)) return [];
+  const out: PostAttachment[] = [];
+  for (const f of files) {
+    if (f == null || typeof f !== 'object') continue;
+    const rec = f as PostAttachment;
+    if (typeof rec.file_key === 'string' && rec.file_key) out.push(rec);
+  }
+  return out;
+}
 
 /**
  * Post-process raw markdown text from an "md" element.
