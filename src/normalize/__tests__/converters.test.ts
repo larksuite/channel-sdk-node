@@ -310,7 +310,11 @@ describe('post converter', () => {
     expect(r.content).toContain('<file key="file_a&quot; onmouseover=&quot;x" name="r.pdf"/>');
     // non-string file_name degrades to no name attribute, no throw
     expect(r.content).toContain('<file key="file_b"/>');
-    expect(r.resources).toContainEqual({ type: 'file', fileKey: 'file_a" onmouseover="x', fileName: 'r.pdf' });
+    expect(r.resources).toContainEqual({
+      type: 'file',
+      fileKey: 'file_a" onmouseover="x',
+      fileName: 'r.pdf',
+    });
     expect(r.resources).toContainEqual({ type: 'file', fileKey: 'file_b', fileName: undefined });
   });
 });
