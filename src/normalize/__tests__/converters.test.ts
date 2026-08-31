@@ -180,4 +180,141 @@ describe('post converter', () => {
     const r = await convertPost('not json', ctx);
     expect(r.content).toBe('[rich text message]');
   });
+
+  test('attachment zone renders files and folders', async () => {
+    const raw = JSON.stringify({
+      zh_cn: {
+        title: '报告',
+        content: [[{ tag: 'text', text: '正文' }]],
+      },
+      files: [
+        { file_key: 'file_a', file_name: 'report.pdf' },
+        { file_key: 'file_b' },
+        { file_key: 'dir_1', file_name: 'assets', is_folder: true },
+      ],
+    });
+    const r = await convertPost(raw, ctx);
+    expect(r.content).toContain('**报告**');
+    expect(r.content).toContain('正文');
+    expect(r.content).toContain('<file key="file_a" name="report.pdf"/>');
+    expect(r.content).toContain('<file key="file_b"/>');
+    expect(r.content).toContain('<folder key="dir_1" name="assets"/>');
+    // Files are downloadable resources; folders are tag-only.
+    expect(r.resources).toContainEqual({ type: 'file', fileKey: 'file_a', fileName: 'report.pdf' });
+    expect(r.resources).toContainEqual({ type: 'file', fileKey: 'file_b', fileName: undefined });
+    expect(r.resources.filter((x) => x.type === 'file').length).toBe(2);
+    // The attachment zone belongs after the body, not interleaved with it.
+    expect(r.content.indexOf('<file key="file_a"')).toBeGreaterThan(r.content.indexOf('正文'));
+  });
+
+  test('attachment zone adds to, and does not replace, body resources', async () => {
+    // The body's own resources and the attachment zone's must coexist.
+    const raw = JSON.stringify({
+      zh_cn: {
+        content: [
+          [
+            { tag: 'img', image_key: 'img_1' },
+            { tag: 'media', file_key: 'media_1' },
+          ],
+        ],
+      },
+      files: [{ file_key: 'file_a', file_name: 'report.pdf' }],
+    });
+    const r = await convertPost(raw, ctx);
+    expect(r.resources).toContainEqual({ type: 'image', fileKey: 'img_1' });
+    expect(r.resources).toContainEqual({ type: 'file', fileKey: 'media_1' });
+    expect(r.resources).toContainEqual({ type: 'file', fileKey: 'file_a', fileName: 'report.pdf' });
+    expect(r.resources).toHaveLength(3);
+  });
+
+  test('attachment zone survives an unusable locale document', async () => {
+    // `files` is a sibling of the locale documents, so attachments must still
+    // surface when no locale document can be unwrapped.
+    const raw = JSON.stringify({
+      schema: '2.0',
+      files: [{ file_key: 'file_a', file_name: 'report.pdf' }],
+    });
+    const r = await convertPost(raw, ctx);
+    expect(r.content).toBe('<file key="file_a" name="report.pdf"/>');
+    expect(r.resources).toEqual([{ type: 'file', fileKey: 'file_a', fileName: 'report.pdf' }]);
+  });
+
+  test('attachment zone tolerates malformed wire values', async () => {
+    // A non-string file_name must not throw: dispatchConvert would trap it and
+    // replace the entire message with the unknown-message placeholder.
+    const raw = JSON.stringify({
+      zh_cn: { content: [[{ tag: 'text', text: '正文' }]] },
+      files: [
+        { file_key: 'file_a', file_name: 123 },
+        { file_key: 'file_b', file_name: { nested: true } },
+        { file_key: '' },
+        { file_key: 42 },
+        null,
+        'not an object',
+      ],
+    });
+    const r = await convertPost(raw, ctx);
+    // The body survives, and only the unusable name is dropped — not the message.
+    expect(r.content).toContain('正文');
+    expect(r.content).toContain('<file key="file_a"/>');
+    expect(r.content).toContain('<file key="file_b"/>');
+    expect(r.resources.filter((x) => x.type === 'file').length).toBe(2);
+  });
+
+  test('attachment zone treats only a real true as a folder', async () => {
+    // A truthy-but-not-true is_folder must not hide a downloadable file.
+    const raw = JSON.stringify({
+      zh_cn: { content: [[{ tag: 'text', text: '正文' }]] },
+      files: [
+        { file_key: 'file_a', file_name: 'report.pdf', is_folder: 'false' },
+        { file_key: 'file_b', file_name: 'other.pdf', is_folder: [] },
+      ],
+    });
+    const r = await convertPost(raw, ctx);
+    expect(r.content).not.toContain('<folder');
+    expect(r.resources.filter((x) => x.type === 'file').length).toBe(2);
+  });
+
+  test('attachment zone escapes quotes in key and name', async () => {
+    const raw = JSON.stringify({
+      zh_cn: { content: [[{ tag: 'text', text: '正文' }]] },
+      files: [{ file_key: 'a"b', file_name: 'c"d.pdf' }],
+    });
+    const r = await convertPost(raw, ctx);
+    expect(r.content).toContain('<file key="a&quot;b" name="c&quot;d.pdf"/>');
+    // The descriptor carries the real key, not the escaped rendering.
+    expect(r.resources).toContainEqual({ type: 'file', fileKey: 'a"b', fileName: 'c"d.pdf' });
+  });
+
+  test('attachment zone ignores empty files array', async () => {
+    const raw = JSON.stringify({
+      zh_cn: { content: [[{ tag: 'text', text: 'hi' }]] },
+      files: [],
+    });
+    const r = await convertPost(raw, ctx);
+    expect(r.content).toContain('hi');
+    expect(r.content).not.toContain('<file');
+    expect(r.resources).toEqual([]);
+  });
+
+  test('attachment zone escapes key and handles non-string name', async () => {
+    const raw = JSON.stringify({
+      zh_cn: { content: [[{ tag: 'text', text: 'hi' }]] },
+      files: [
+        { file_key: 'file_a" onmouseover="x', file_name: 'r.pdf' },
+        { file_key: 'file_b', file_name: 123 as unknown },
+      ],
+    });
+    const r = await convertPost(raw, ctx);
+    // key with a quote is escaped so it cannot forge attributes
+    expect(r.content).toContain('<file key="file_a&quot; onmouseover=&quot;x" name="r.pdf"/>');
+    // non-string file_name degrades to no name attribute, no throw
+    expect(r.content).toContain('<file key="file_b"/>');
+    expect(r.resources).toContainEqual({
+      type: 'file',
+      fileKey: 'file_a" onmouseover="x',
+      fileName: 'r.pdf',
+    });
+    expect(r.resources).toContainEqual({ type: 'file', fileKey: 'file_b', fileName: undefined });
+  });
 });
