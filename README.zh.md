@@ -92,7 +92,8 @@ const channel = createLarkChannel({ appId: client_id, appSecret: client_secret }
 | `respectProxyEnv` | `boolean` | `false` | 读 `HTTPS_PROXY` / `HTTP_PROXY`，WS + REST 都走代理 |
 | `httpTimeoutMs` | `number` | — | REST 调用超时 |
 | `agent` | `http(s).Agent` | — | 自定义 WS agent（优先于 `respectProxyEnv`） |
-| `handshakeTimeoutMs` | `number` | — | WS 握手超时 |
+| `handshakeTimeoutMs` | `number` | — | **单次** WS 握手尝试的超时 |
+| `connectTimeoutMs` | `number` | `15000` | `connect()` 最多等多久连上，超时即放弃（强制重连同样适用） |
 | `wsConfig` | `WSConfigOverrides` | — | WS 客户端设置（`pingTimeout`） |
 | `domain` | `Domain \| string` | `Feishu` | 飞书 / Lark 域名 |
 | `cache` | `Cache` | 内置 | 缓存实例（去重 / 凭据） |
@@ -100,6 +101,11 @@ const channel = createLarkChannel({ appId: client_id, appSecret: client_secret }
 | `httpInstance` | `HttpInstance` | 共享默认 | 自定义 HTTP 实例（自带时 timeout/代理由你自行配置） |
 | `source` | `string` | — | User-Agent 标记 |
 | `includeRawEvent` | `boolean` | `false` | 每个事件附带原始载荷 `evt.raw` |
+
+> **升级到 0.6.1 注意**：`handshakeTimeoutMs` 不再决定强制重连最多等多久，这件事现在
+> 由 `connectTimeoutMs`（默认 `15000`）负责。如果你此前是靠调小 `handshakeTimeoutMs`
+> 来缩短强制重连的等待，请把同样的数值显式设到 `connectTimeoutMs`，才能保持原来的行为。
+> `handshakeTimeoutMs` 仍然管**单次**握手的超时，也照旧转发给底层传输层。
 
 `PolicyConfig`：`requireMention` · `dmMode`（`'open' \| 'allowlist' \| 'pair' \| 'disabled'`）· `dmAllowlist` · `groupAllowlist` · `respondToMentionAll` · `botLoopGuard`（见 [Bot-at-bot](#bot-at-bot)）。`dmAllowlist` 填**发送方 id**（`ou_…` / user_id / union_id），`groupAllowlist` 填**群 id**（`oc_…`）——应用 id（`cli_…`）两者都不属于，填了会告警。
 

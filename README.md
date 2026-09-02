@@ -106,7 +106,8 @@ the QR URL as `source/<name>` (passed through as-is, not defaulted).
 | `respectProxyEnv` | `boolean` | `false` | Route WS + REST through `HTTPS_PROXY` / `HTTP_PROXY` |
 | `httpTimeoutMs` | `number` | — | Per-request REST timeout |
 | `agent` | `http(s).Agent` | — | Custom WS agent (wins over `respectProxyEnv`) |
-| `handshakeTimeoutMs` | `number` | — | WS handshake timeout |
+| `handshakeTimeoutMs` | `number` | — | Timeout for a *single* WS handshake attempt |
+| `connectTimeoutMs` | `number` | `15000` | How long `connect()` waits to get connected before giving up (force-reconnect too) |
 | `wsConfig` | `WSConfigOverrides` | — | Client-only WS settings (`pingTimeout`) |
 | `domain` | `Domain \| string` | `Feishu` | Feishu / Lark domain |
 | `cache` | `Cache` | built-in | Cache instance (dedup / credentials) |
@@ -114,6 +115,12 @@ the QR URL as `source/<name>` (passed through as-is, not defaulted).
 | `httpInstance` | `HttpInstance` | shared default | Custom HTTP instance (then configure timeout/proxy yourself) |
 | `source` | `string` | — | User-Agent tag |
 | `includeRawEvent` | `boolean` | `false` | Attach the raw event payload as `evt.raw` |
+
+> **Upgrading to 0.6.1** — `handshakeTimeoutMs` no longer decides how long a
+> force-reconnect waits; `connectTimeoutMs` (default `15000`) does. If you shortened
+> force-reconnect attempts by lowering `handshakeTimeoutMs`, set `connectTimeoutMs`
+> to that value to keep the old behaviour. `handshakeTimeoutMs` still bounds a
+> single handshake and is still forwarded to the transport.
 
 `PolicyConfig`: `requireMention` · `dmMode` (`'open' \| 'allowlist' \| 'pair' \| 'disabled'`) · `dmAllowlist` · `groupAllowlist` · `respondToMentionAll` · `botLoopGuard` (see [Bot-at-bot](#bot-at-bot)). `dmAllowlist` takes **sender ids** (`ou_…` / user_id / union_id), `groupAllowlist` takes **chat ids** (`oc_…`) — an app id (`cli_…`) belongs in neither and is warned about.
 

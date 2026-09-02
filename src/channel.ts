@@ -65,6 +65,15 @@ import {
 
 type Unsubscribe = () => void;
 
+/** Fallback budget for {@link LarkChannelOptions.connectTimeoutMs}. */
+const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
+
+/**
+ * `setTimeout`'s 32-bit ceiling. Anything above it wraps to a 1ms delay, so a
+ * deliberately generous budget would otherwise become an instant timeout.
+ */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
 /** Options for {@link LarkChannel.getChatMembers}. */
 interface GetChatMembersOptions {
   pageSize?: number;
@@ -229,7 +238,7 @@ export class LarkChannel {
 
     const transport = this.opts.transport ?? 'websocket';
     if (transport === 'websocket') {
-      await this.connectWebSocket(15000);
+      await this.connectWebSocket(this.resolveConnectTimeoutMs());
       this.startKeepaliveIfEnabled();
     }
     // webhook transport wiring is external: user plugs this.dispatcher into
@@ -261,7 +270,20 @@ export class LarkChannel {
       /* best effort */
     }
     this.rawWsClient = undefined;
-    await this.connectWebSocket(this.opts.handshakeTimeoutMs ?? 15000);
+    await this.connectWebSocket(this.resolveConnectTimeoutMs());
+  }
+
+  /**
+   * Shared by `connect()` and `forceReconnect()` so the two can't drift apart.
+   * Value domain and the reason for the fallback: see
+   * {@link LarkChannelOptions.connectTimeoutMs}.
+   */
+  private resolveConnectTimeoutMs(): number {
+    const configured = this.opts.connectTimeoutMs;
+    if (typeof configured === 'number' && Number.isFinite(configured) && configured > 0) {
+      return Math.min(configured, MAX_TIMER_DELAY_MS);
+    }
+    return DEFAULT_CONNECT_TIMEOUT_MS;
   }
 
   /**
@@ -322,9 +344,23 @@ export class LarkChannel {
   private connectWebSocket(timeoutMs: number): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       let settled = false;
+      // Held per attempt rather than read off `this.rawWsClient`: a concurrent
+      // reconnect may already have repointed that field at a newer client, and
+      // tearing that one down would kill a live session.
+      let attemptClient: WSClient | undefined;
       const timer = setTimeout(() => {
         if (settled) return;
         settled = true;
+        // The caller has given up on this attempt and may start another right
+        // away. Left alone, this client keeps reconnecting on its own —
+        // leaking a socket and timers, and still delivering events into the
+        // caller's handlers — with nothing left holding a reference to it.
+        // See https://github.com/larksuite/node-sdk/issues/197
+        try {
+          attemptClient?.close({ force: true });
+        } catch {
+          /* best effort */
+        }
         reject(
           new LarkChannelError(
             'not_connected',
@@ -333,7 +369,7 @@ export class LarkChannel {
         );
       }, timeoutMs);
 
-      this.rawWsClient = new WSClient({
+      attemptClient = new WSClient({
         appId: this.opts.appId,
         appSecret: this.opts.appSecret,
         domain: this.opts.domain ?? Domain.Feishu,
@@ -365,7 +401,8 @@ export class LarkChannel {
         onReconnecting: () => this.handlers.reconnecting?.(),
         onReconnected: () => this.handlers.reconnected?.(),
       });
-      this.rawWsClient.start({ eventDispatcher: this.dispatcher });
+      this.rawWsClient = attemptClient;
+      attemptClient.start({ eventDispatcher: this.dispatcher });
     });
   }
 
