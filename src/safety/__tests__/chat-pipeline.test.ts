@@ -1,6 +1,11 @@
 import type { NormalizedMessage } from '../../types';
 import { ChatPipeline, ChatPipelineManager } from '../chat-pipeline';
+import type { ProcessingLease } from '../processing-lock';
 import { DEFAULT_BATCH } from '../types';
+
+function lease(id: string): ProcessingLease {
+  return Object.freeze({ id, ownerToken: Symbol(id) });
+}
 
 function makeMsg(id: string, content: string, chatId = 'oc_test'): NormalizedMessage {
   return {
@@ -24,42 +29,45 @@ async function flushTimers(ms: number): Promise<void> {
 
 describe('ChatPipeline — push (batching)', () => {
   test('single message flushes after debounce delay', async () => {
-    const flushes: { message: NormalizedMessage; sourceIds: string[] }[] = [];
+    const flushes: Array<{ message: NormalizedMessage; sources: Array<{ messageId: string }> }> =
+      [];
     const p = new ChatPipeline({ ...DEFAULT_BATCH, delayMs: 50 }, false);
-    p.push(makeMsg('m1', 'hello'), async (b) => {
+    p.push(makeMsg('m1', 'hello'), lease('m1'), async (b) => {
       flushes.push(b);
     });
     await flushTimers(80);
     expect(flushes).toHaveLength(1);
-    expect(flushes[0].sourceIds).toEqual(['m1']);
+    expect(flushes[0].sources.map((source) => source.messageId)).toEqual(['m1']);
     expect(flushes[0].message.content).toBe('hello');
   });
 
   test('rapid messages within window merge into one batch', async () => {
-    const flushes: { message: NormalizedMessage; sourceIds: string[] }[] = [];
+    const flushes: Array<{ message: NormalizedMessage; sources: Array<{ messageId: string }> }> =
+      [];
     const p = new ChatPipeline({ ...DEFAULT_BATCH, delayMs: 50 }, false);
-    p.push(makeMsg('m1', 'hello'), async (b) => {
+    p.push(makeMsg('m1', 'hello'), lease('m1'), async (b) => {
       flushes.push(b);
     });
-    p.push(makeMsg('m2', 'world'), async (b) => {
+    p.push(makeMsg('m2', 'world'), lease('m2'), async (b) => {
       flushes.push(b);
     });
-    p.push(makeMsg('m3', 'foo'), async (b) => {
+    p.push(makeMsg('m3', 'foo'), lease('m3'), async (b) => {
       flushes.push(b);
     });
     await flushTimers(100);
     expect(flushes).toHaveLength(1);
-    expect(flushes[0].sourceIds).toEqual(['m1', 'm2', 'm3']);
+    expect(flushes[0].sources.map((source) => source.messageId)).toEqual(['m1', 'm2', 'm3']);
     expect(flushes[0].message.content).toBe('hello\n\nworld\n\nfoo');
   });
 
   test('maxMessages forces flush', async () => {
-    const flushes: { message: NormalizedMessage; sourceIds: string[] }[] = [];
+    const flushes: Array<{ message: NormalizedMessage; sources: Array<{ messageId: string }> }> =
+      [];
     const p = new ChatPipeline({ ...DEFAULT_BATCH, delayMs: 10_000, maxMessages: 2 }, false);
-    p.push(makeMsg('m1', 'a'), async (b) => {
+    p.push(makeMsg('m1', 'a'), lease('m1'), async (b) => {
       flushes.push(b);
     });
-    p.push(makeMsg('m2', 'b'), async (b) => {
+    p.push(makeMsg('m2', 'b'), lease('m2'), async (b) => {
       flushes.push(b);
     });
     await flushTimers(50);
@@ -67,9 +75,10 @@ describe('ChatPipeline — push (batching)', () => {
   });
 
   test('maxChars forces flush', async () => {
-    const flushes: { message: NormalizedMessage; sourceIds: string[] }[] = [];
+    const flushes: Array<{ message: NormalizedMessage; sources: Array<{ messageId: string }> }> =
+      [];
     const p = new ChatPipeline({ ...DEFAULT_BATCH, delayMs: 10_000, maxChars: 5 }, false);
-    p.push(makeMsg('m1', 'hello'), async (b) => {
+    p.push(makeMsg('m1', 'hello'), lease('m1'), async (b) => {
       flushes.push(b);
     });
     await flushTimers(50);
@@ -77,9 +86,10 @@ describe('ChatPipeline — push (batching)', () => {
   });
 
   test('serial-only mode flushes immediately', async () => {
-    const flushes: { message: NormalizedMessage; sourceIds: string[] }[] = [];
+    const flushes: Array<{ message: NormalizedMessage; sources: Array<{ messageId: string }> }> =
+      [];
     const p = new ChatPipeline({ ...DEFAULT_BATCH, delayMs: 1000 }, true);
-    p.push(makeMsg('m1', 'a'), async (b) => {
+    p.push(makeMsg('m1', 'a'), lease('m1'), async (b) => {
       flushes.push(b);
     });
     await flushTimers(20);
@@ -98,9 +108,9 @@ describe('ChatPipeline — serialization', () => {
       order.push(`${id}-end`);
     };
 
-    p.push(makeMsg('m1', 'a'), slow('m1', 40));
+    p.push(makeMsg('m1', 'a'), lease('m1'), slow('m1', 40));
     await flushTimers(30);
-    p.push(makeMsg('m2', 'b'), slow('m2', 20));
+    p.push(makeMsg('m2', 'b'), lease('m2'), slow('m2', 20));
     await flushTimers(200);
 
     // m1 must complete before m2 starts
@@ -115,7 +125,7 @@ describe('ChatPipeline — serialization', () => {
     const order: string[] = [];
     const p = new ChatPipeline({ ...DEFAULT_BATCH, delayMs: 30 }, false);
 
-    p.push(makeMsg('m1', 'a'), async () => {
+    p.push(makeMsg('m1', 'a'), lease('m1'), async () => {
       await flushTimers(50);
       order.push('batch');
     });
@@ -147,7 +157,7 @@ describe('ChatPipelineManager', () => {
     const mgr = new ChatPipelineManager({ ...DEFAULT_BATCH, delayMs: 10 });
     const order: string[] = [];
 
-    mgr.push('A', makeMsg('m1', 'a'), async () => {
+    mgr.push('A', makeMsg('m1', 'a'), lease('m1'), async () => {
       await flushTimers(30);
       order.push('push');
     });

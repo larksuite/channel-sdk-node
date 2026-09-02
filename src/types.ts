@@ -171,7 +171,7 @@ export interface EventMap {
   reaction: (evt: ReactionEvent) => void;
   botAdded: (evt: BotAddedEvent) => void;
   comment: (evt: CommentEvent) => void | Promise<void>;
-  error: (err: LarkChannelError) => void;
+  error: (err: LarkChannelError) => void | Promise<void>;
   reconnecting: () => void;
   reconnected: () => void;
 }
@@ -471,6 +471,19 @@ export interface SafetyConfig {
     ttl?: number;
     maxEntries?: number;
     sweepIntervalMs?: number;
+  };
+  processingLock?: {
+    /**
+     * Lease TTL in integer milliseconds (1..2,147,483,647). Defaults to
+     * 300,000. Wall-clock expiry never lets a competing owner steal an active
+     * or finalizing lease.
+     */
+    ttlMs?: number;
+    /**
+     * Renewal interval in integer milliseconds (1..2,147,483,647). Defaults
+     * to 60,000 with the default TTL and must be less than `ttlMs`.
+     */
+    renewIntervalMs?: number;
   };
   chatQueue?: {
     enabled?: boolean;

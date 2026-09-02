@@ -11,6 +11,7 @@
 import type { Logger, WSConnectionStatus } from '../internal';
 import { startKeepalive } from '../keepalive';
 import { ChatPipeline } from '../safety/chat-pipeline';
+import type { ProcessingLease } from '../safety/processing-lock';
 import type { BatchConfig, BatchedDispatch } from '../safety/types';
 import type { NormalizedMessage } from '../types';
 
@@ -21,6 +22,10 @@ const silent: Logger = {
   debug: () => {},
   trace: () => {},
 };
+
+function lease(id: string): ProcessingLease {
+  return Object.freeze({ id, ownerToken: Symbol(id) });
+}
 
 function msg(id: string, content = id): NormalizedMessage {
   return {
@@ -65,19 +70,19 @@ describe('ChatPipeline mergeWhileBusy', () => {
       return Promise.resolve();
     };
 
-    p.push(msg('a'), handler); // flush #1 starts, pipeline now busy
-    p.push(msg('b'), handler); // accumulate while busy
-    p.push(msg('c'), handler); // accumulate while busy
+    p.push(msg('a'), lease('a'), handler); // flush #1 starts, pipeline now busy
+    p.push(msg('b'), lease('b'), handler); // accumulate while busy
+    p.push(msg('c'), lease('c'), handler); // accumulate while busy
     await Promise.resolve();
     // Only the first batch has dispatched so far.
     expect(batches).toHaveLength(1);
-    expect(batches[0].sourceIds).toEqual(['a']);
+    expect(batches[0].sources.map((source) => source.messageId)).toEqual(['a']);
 
     releaseFirst(); // first handler resolves → settle hook flushes b+c
     await p.flushNow();
 
     expect(batches).toHaveLength(2);
-    expect(batches[1].sourceIds).toEqual(['b', 'c']);
+    expect(batches[1].sources.map((source) => source.messageId)).toEqual(['b', 'c']);
     expect(batches[1].message.content).toBe('b\n\nc');
   });
 
@@ -88,10 +93,10 @@ describe('ChatPipeline mergeWhileBusy', () => {
       batches.push(d);
       return Promise.resolve();
     };
-    p.push(msg('a'), handler);
-    p.push(msg('b'), handler);
+    p.push(msg('a'), lease('a'), handler);
+    p.push(msg('b'), lease('b'), handler);
     await p.flushNow();
-    expect(batches.map((b) => b.sourceIds)).toEqual([['a'], ['b']]);
+    expect(batches.map((b) => b.sources.map((source) => source.messageId))).toEqual([['a'], ['b']]);
   });
 });
 

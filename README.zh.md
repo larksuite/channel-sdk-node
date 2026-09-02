@@ -109,7 +109,13 @@ const channel = createLarkChannel({ appId: client_id, appSecret: client_secret }
 
 `PolicyConfig`：`requireMention` · `dmMode`（`'open' \| 'allowlist' \| 'pair' \| 'disabled'`）· `dmAllowlist` · `groupAllowlist` · `respondToMentionAll` · `botLoopGuard`（见 [Bot-at-bot](#bot-at-bot)）。`dmAllowlist` 填**发送方 id**（`ou_…` / user_id / union_id），`groupAllowlist` 填**群 id**（`oc_…`）——应用 id（`cli_…`）两者都不属于，填了会告警。
 
-`SafetyConfig`：`dedup`（`ttl`/`maxEntries`/`sweepIntervalMs`）· `chatQueue`（`enabled`、`mergeWhileBusy`）· `batch.text` / `batch.media` · `staleMessageWindowMs`。
+`SafetyConfig`：`dedup`（`ttl`/`maxEntries`/`sweepIntervalMs`）· `processingLock`（`ttlMs`/`renewIntervalMs`）· `chatQueue`（`enabled`、`mergeWhileBusy`）· `batch.text` / `batch.media` · `staleMessageWindowMs`。
+
+`processingLock` 默认 TTL 为 300,000 ms，续租间隔为 60,000 ms。两者都必须是
+1 到 2,147,483,647 范围内的整数毫秒，并且 `renewIntervalMs` 必须小于
+`ttlMs`。如果只覆盖 `ttlMs`，续租间隔取 60,000 ms 与 TTL 三分之一向下取整
+后的较小值（最小 1 ms）。lease owner 由 token 绑定：active 或 finalizing
+handler 不会仅因墙上时钟越过 TTL 而被其他请求抢占。
 
 ### 生命周期
 

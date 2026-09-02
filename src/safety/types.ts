@@ -1,4 +1,5 @@
 import type { NormalizedMessage, RejectEvent, SafetyConfig } from '../types';
+import type { ProcessingLease } from './processing-lock';
 
 export interface BatchConfig {
   delayMs: number;
@@ -29,10 +30,11 @@ export const DEFAULT_DEDUP = {
 
 export const DEFAULT_STALE_MS = 30 * 60_000;
 export const DEFAULT_LOCK_TTL_MS = 5 * 60_000;
+export const DEFAULT_LOCK_RENEW_INTERVAL_MS = 60_000;
 
 export interface BatchedDispatch {
   message: NormalizedMessage;
-  sourceIds: string[];
+  sources: Array<{ messageId: string; lease: ProcessingLease }>;
 }
 
 export type OnReject = (evt: RejectEvent) => void;

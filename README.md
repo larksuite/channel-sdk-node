@@ -124,7 +124,15 @@ the QR URL as `source/<name>` (passed through as-is, not defaulted).
 
 `PolicyConfig`: `requireMention` · `dmMode` (`'open' \| 'allowlist' \| 'pair' \| 'disabled'`) · `dmAllowlist` · `groupAllowlist` · `respondToMentionAll` · `botLoopGuard` (see [Bot-at-bot](#bot-at-bot)). `dmAllowlist` takes **sender ids** (`ou_…` / user_id / union_id), `groupAllowlist` takes **chat ids** (`oc_…`) — an app id (`cli_…`) belongs in neither and is warned about.
 
-`SafetyConfig`: `dedup` (`ttl`/`maxEntries`/`sweepIntervalMs`) · `chatQueue` (`enabled`, `mergeWhileBusy`) · `batch.text` / `batch.media` · `staleMessageWindowMs`.
+`SafetyConfig`: `dedup` (`ttl`/`maxEntries`/`sweepIntervalMs`) · `processingLock` (`ttlMs`/`renewIntervalMs`) · `chatQueue` (`enabled`, `mergeWhileBusy`) · `batch.text` / `batch.media` · `staleMessageWindowMs`.
+
+`processingLock` defaults to a 300,000 ms TTL and a 60,000 ms renewal interval. Both
+values must be integer milliseconds from 1 through 2,147,483,647, and
+`renewIntervalMs` must be less than `ttlMs`. If only `ttlMs` is overridden, the
+renewal interval is derived as the smaller of 60,000 ms and one third of the TTL
+(rounded down, with a 1 ms minimum). Lease ownership is token-bound: an active or
+finalizing handler cannot be displaced merely because wall-clock time has passed
+its TTL.
 
 ### Lifecycle
 
@@ -575,4 +583,3 @@ guarantee.
 ## License
 
 MIT
-

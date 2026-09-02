@@ -12,7 +12,7 @@ import { ChatPipelineManager } from './chat-pipeline';
 import { SeenCache } from './dedup-cache';
 import { LoopGuard } from './loop-guard';
 import { PolicyGate } from './policy-gate';
-import { ProcessingLock } from './processing-lock';
+import { type ProcessingLease, ProcessingLock } from './processing-lock';
 import { isStale } from './stale-detector';
 import {
   DEFAULT_STALE_MS,
@@ -26,6 +26,7 @@ export { SeenCache } from './dedup-cache';
 export { LoopGuard } from './loop-guard';
 export type { PolicyDecision } from './policy-gate';
 export { PolicyGate } from './policy-gate';
+export type { ProcessingLease } from './processing-lock';
 export { ProcessingLock } from './processing-lock';
 export { isStale } from './stale-detector';
 
@@ -37,6 +38,7 @@ export interface SafetyPipelineOptions {
   logger: Logger;
   onReject: OnReject;
   onMessage: OnMessageDispatch;
+  onError?: (error: unknown) => void;
 }
 
 /**
@@ -59,21 +61,26 @@ export class SafetyPipeline {
   private readonly logger: Logger;
   private readonly onReject: OnReject;
   private readonly onMessage: OnMessageDispatch;
+  private readonly onError?: (error: unknown) => void;
 
   constructor(opts: SafetyPipelineOptions) {
     this.logger = opts.logger;
     this.onReject = opts.onReject;
     this.onMessage = opts.onMessage;
+    this.onError = opts.onError;
 
     this.staleWindow = opts.config?.staleMessageWindowMs ?? DEFAULT_STALE_MS;
     this.queueEnabled = opts.config?.chatQueue?.enabled ?? true;
 
+    this.lock = new ProcessingLock(
+      opts.config?.processingLock?.ttlMs,
+      opts.config?.processingLock?.renewIntervalMs,
+    );
     this.seenCache = new SeenCache(opts.cache, {
       ttlMs: opts.config?.dedup?.ttl,
       maxMemEntries: opts.config?.dedup?.maxEntries,
       sweepMs: opts.config?.dedup?.sweepIntervalMs,
     });
-    this.lock = new ProcessingLock();
     this.policy = new PolicyGate(opts.policy, opts.botIdentity, opts.logger);
     this.loopGuard = new LoopGuard(opts.policy?.botLoopGuard, opts.logger);
     this.manager = new ChatPipelineManager(resolveBatchConfig(opts.config));
@@ -118,33 +125,43 @@ export class SafetyPipeline {
       return;
     }
 
-    if (!this.lock.acquire(msg.messageId)) {
+    const lease = this.lock.acquire(msg.messageId);
+    if (!lease) {
       this.logger.debug?.(`safety: drop in-flight message ${msg.messageId}`);
       return;
     }
 
-    const dispatchHandler = async (batch: { message: NormalizedMessage; sourceIds: string[] }) => {
+    const dispatchHandler = async (batch: {
+      message: NormalizedMessage;
+      sources: Array<{ messageId: string; lease: ProcessingLease }>;
+    }) => {
       try {
         await this.onMessage(batch.message);
       } catch (e) {
         this.logger.error?.(`safety: message handler threw`, e);
+        try {
+          this.onError?.(e);
+        } catch (observerError) {
+          this.logger.error?.(`safety: error observer threw`, observerError);
+        }
       } finally {
-        for (const id of batch.sourceIds) {
+        for (const source of batch.sources) {
+          this.lock.stopRenewal(source.lease);
           try {
-            await this.seenCache.add(id);
+            await this.seenCache.add(source.messageId);
           } catch {
             /* best effort */
           }
-          this.lock.release(id);
+          this.lock.release(source.lease);
         }
       }
     };
 
     if (this.queueEnabled) {
-      this.manager.push(msg.chatId, msg, dispatchHandler);
+      this.manager.push(msg.chatId, msg, lease, dispatchHandler);
     } else {
       // queueing disabled: fire-and-forget, no batch either
-      void dispatchHandler({ message: msg, sourceIds: [msg.messageId] });
+      void dispatchHandler({ message: msg, sources: [{ messageId: msg.messageId, lease }] });
     }
   }
 
@@ -159,7 +176,8 @@ export class SafetyPipeline {
       this.logger.debug?.(`safety: drop duplicate action ${eventId}`);
       return undefined;
     }
-    if (!this.lock.acquire(eventId)) {
+    const lease = this.lock.acquire(eventId);
+    if (!lease) {
       this.logger.debug?.(`safety: drop in-flight action ${eventId}`);
       return undefined;
     }
@@ -175,12 +193,13 @@ export class SafetyPipeline {
         this.logger.error?.(`safety: action handler threw`, e);
         return undefined;
       } finally {
+        this.lock.stopRenewal(lease);
         try {
           await this.seenCache.add(eventId);
         } catch {
           /* best effort */
         }
-        this.lock.release(eventId);
+        this.lock.release(lease);
       }
     };
 

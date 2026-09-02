@@ -217,6 +217,7 @@ export class LarkChannel {
         const handler = this.handlers.message;
         if (handler) await handler(merged);
       },
+      onError: (error) => this.emitError(error),
     });
   }
 
@@ -1386,8 +1387,25 @@ export class LarkChannel {
             cause: e,
           });
     const handler = this.handlers.error;
-    if (handler) handler(err);
-    else this.logger.error?.('channel: unhandled error', err);
+    if (!handler) {
+      this.logger.error?.('channel: unhandled error', err);
+      return;
+    }
+    try {
+      void Promise.resolve(handler(err)).catch((observerError) => {
+        this.logErrorObserverFailure(observerError);
+      });
+    } catch (observerError) {
+      this.logErrorObserverFailure(observerError);
+    }
+  }
+
+  private logErrorObserverFailure(observerError: unknown): void {
+    try {
+      this.logger.error?.('channel: error handler threw', observerError);
+    } catch {
+      /* an observer failure must never escape through its logger */
+    }
   }
 }
 
