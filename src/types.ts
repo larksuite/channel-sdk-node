@@ -348,12 +348,34 @@ export interface LarkChannelOptions {
   wsConfig?: WSConfigOverrides;
 
   /**
-   * Maximum time (ms) to wait for the WebSocket handshake (`open` /
-   * `error`) before aborting the attempt and letting the retry loop try
-   * again. When unset, no timeout is enforced — the handshake can hang
-   * indefinitely on stuck DNS / proxy / NAT paths.
+   * Maximum time (ms) a *single* WebSocket handshake (`open` / `error`) may
+   * take before that attempt is aborted and the underlying retry loop tries
+   * again. Forwarded as-is to the underlying WSClient. When unset, no
+   * per-attempt timeout is enforced — one handshake can hang indefinitely on
+   * stuck DNS / proxy / NAT paths.
+   *
+   * This is **not** the budget for how long `connect()` waits before giving
+   * up; that is {@link connectTimeoutMs}.
    */
   handshakeTimeoutMs?: number;
+
+  /**
+   * Total time (ms) to wait for a WebSocket handshake to succeed before
+   * giving up on the attempt. Applies both to `connect()` and to the
+   * internal force-reconnect that keepalive triggers. On expiry the pending
+   * `WSClient` is torn down and the caller gets a `not_connected`
+   * `LarkChannelError` naming the elapsed budget.
+   *
+   * Defaults to 15000. `NaN`, `0`, negatives and non-finite values fall back
+   * to the default; values above the timer's 32-bit ceiling (2147483647ms) are
+   * clamped down to it. Both rules exist for the same reason: `setTimeout`
+   * turns an out-of-domain delay into 1ms, which would silently invert both an
+   * unset `Number(process.env.X)` and a deliberately generous budget.
+   *
+   * Distinct from {@link handshakeTimeoutMs}, which bounds one handshake
+   * attempt; this bounds the wait as a whole.
+   */
+  connectTimeoutMs?: number;
 
   /**
    * Optional Node http(s) agent forwarded to the underlying WSClient for

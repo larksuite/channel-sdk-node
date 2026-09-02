@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@larksuiteoapi/node-sdk':
-        specifier: ^1.73.0
-        version: 1.73.0
+        specifier: ^1.73.1
+        version: 1.73.1
       https-proxy-agent:
         specifier: ^9.0.0
         version: 9.0.0
@@ -288,8 +288,8 @@ packages:
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
 
-  '@larksuiteoapi/node-sdk@1.73.0':
-    resolution: {integrity: sha512-gs4EiupJ6RdYAEJGtuYrCVsB7wSMBwtUDK+ilpmOHD6RTvbtciW6AWciQO9coOQVuBZfh7hvAi25dPfCsny/nA==}
+  '@larksuiteoapi/node-sdk@1.73.1':
+    resolution: {integrity: sha512-Ejw1RolS4p7CuYFGSEPM7+RJfzTaIeRHGIDAaBOJzhSfbSVOaXqbE28o2ydIIKclT0+fMtlUy96uQNHEaW23yA==}
 
   '@napi-rs/wasm-runtime@1.1.4':
     resolution: {integrity: sha512-3NQNNgA1YSlJb/kMH1ildASP9HW7/7kYnRI2szWJaofaS1hWmbGI4H+d3+22aGzXXN9IJ+n+GiFVcGipJP18ow==}
@@ -1215,7 +1215,7 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
 
-  '@larksuiteoapi/node-sdk@1.73.0':
+  '@larksuiteoapi/node-sdk@1.73.1':
     dependencies:
       axios: 1.19.0
       lodash.identity: 3.0.0
