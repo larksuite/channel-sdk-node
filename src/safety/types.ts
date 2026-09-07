@@ -49,3 +49,27 @@ export function resolveBatchConfig(cfg?: SafetyConfig): BatchConfig {
     mergeWhileBusy: cfg?.chatQueue?.mergeWhileBusy ?? DEFAULT_BATCH.mergeWhileBusy,
   };
 }
+
+export type CardActionQueueMode = NonNullable<
+  NonNullable<SafetyConfig['chatQueue']>['cardActions']
+>;
+
+const CARD_ACTION_QUEUE_MODES: readonly CardActionQueueMode[] = ['same', 'separate'];
+
+/**
+ * `undefined` is the silent default. Anything outside the accepted set falls
+ * back to `'same'` and is flagged, so the pipeline can warn once instead of
+ * refusing to start over a typo.
+ */
+export function resolveCardActionQueueMode(value: unknown): {
+  mode: CardActionQueueMode;
+  unrecognized: boolean;
+} {
+  if (value === undefined) return { mode: 'same', unrecognized: false };
+  if (isCardActionQueueMode(value)) return { mode: value, unrecognized: false };
+  return { mode: 'same', unrecognized: true };
+}
+
+function isCardActionQueueMode(value: unknown): value is CardActionQueueMode {
+  return (CARD_ACTION_QUEUE_MODES as readonly unknown[]).includes(value);
+}

@@ -15,10 +15,12 @@ import { PolicyGate } from './policy-gate';
 import { ProcessingLock } from './processing-lock';
 import { isStale } from './stale-detector';
 import {
+  type CardActionQueueMode,
   DEFAULT_STALE_MS,
   type OnMessageDispatch,
   type OnReject,
   resolveBatchConfig,
+  resolveCardActionQueueMode,
 } from './types';
 
 export { ChatPipeline, ChatPipelineManager } from './chat-pipeline';
@@ -43,9 +45,11 @@ export interface SafetyPipelineOptions {
  * Pipeline entry facade for the channel's safety layer.
  *
  * Three tiers of protection, each targeting different event shapes:
- *   - pushMessage: full pipeline (stale + dedup + policy + lock + batch + queue)
- *   - pushAction:  dedup + lock + queue — for card button clicks and doc comments
- *   - pushLight:   dedup only — for reactions
+ *   - pushMessage:    full pipeline (stale + dedup + policy + lock + batch + queue)
+ *   - pushAction:     dedup + lock + queue (fileToken lane) — doc comments
+ *   - pushCardAction: dedup + lock + queue — card clicks; the lane is chosen by
+ *                     `chatQueue.cardActions`
+ *   - pushLight:      dedup only — for reactions
  */
 export class SafetyPipeline {
   private readonly seenCache: SeenCache;
@@ -53,6 +57,8 @@ export class SafetyPipeline {
   private readonly policy: PolicyGate;
   private readonly loopGuard: LoopGuard;
   private readonly manager: ChatPipelineManager;
+  private readonly cardActionManager: ChatPipelineManager;
+  private readonly cardActionMode: CardActionQueueMode;
   private readonly staleWindow: number;
   private readonly queueEnabled: boolean;
 
@@ -76,7 +82,22 @@ export class SafetyPipeline {
     this.lock = new ProcessingLock();
     this.policy = new PolicyGate(opts.policy, opts.botIdentity, opts.logger);
     this.loopGuard = new LoopGuard(opts.policy?.botLoopGuard, opts.logger);
-    this.manager = new ChatPipelineManager(resolveBatchConfig(opts.config));
+    const batch = resolveBatchConfig(opts.config);
+    this.manager = new ChatPipelineManager(batch);
+    // Card actions may get a lane of their own (`chatQueue.cardActions:
+    // 'separate'`). A second manager rather than a prefixed scope in the first:
+    // it only ever sees `run()`, so its pipelines are pure-serial, and it shares
+    // no state with the message lane — a click can neither wait behind a message
+    // handler nor flush that chat's debounce window early.
+    this.cardActionManager = new ChatPipelineManager(batch);
+    const rawMode = opts.config?.chatQueue?.cardActions;
+    const { mode, unrecognized } = resolveCardActionQueueMode(rawMode);
+    this.cardActionMode = mode;
+    if (unrecognized) {
+      this.logger.warn?.(
+        `safety: unrecognized chatQueue.cardActions "${String(rawMode)}" (expected 'same' | 'separate'), falling back to 'same'`,
+      );
+    }
   }
 
   // ─── tier 1: full pipeline for IM messages ─────────────
@@ -150,10 +171,53 @@ export class SafetyPipeline {
 
   // ─── tier 2: dedup + lock + queue for cardAction & comment ─────
 
+  /**
+   * Doc comments, or any action keyed by a non-chat scope. Serialized on the
+   * shared manager under `queueScope`.
+   */
   async pushAction<T>(
     eventId: string,
     queueScope: string,
     handler: () => Promise<T>,
+  ): Promise<T | undefined> {
+    return this.guardAction(eventId, handler, (task) =>
+      this.queueEnabled ? this.manager.run(queueScope, task) : task(),
+    );
+  }
+
+  /**
+   * Card button clicks. Which per-chat lane they join is decided here, from
+   * `chatQueue.cardActions`, so the channel only has to say "this is a card
+   * action". Under `'same'` this is exactly the shared path `pushAction`
+   * takes; under `'separate'` the click never touches the message lane.
+   */
+  async pushCardAction<T>(
+    eventId: string,
+    chatId: string,
+    handler: () => Promise<T>,
+  ): Promise<T | undefined> {
+    return this.guardAction(eventId, handler, (task) => {
+      if (!this.queueEnabled) return task();
+      const lanes = this.cardActionMode === 'separate' ? this.cardActionManager : this.manager;
+      return lanes.run(chatId, task);
+    });
+  }
+
+  /**
+   * What every action shares: drop redeliveries, hold the in-flight lock across
+   * the handler, and always leave the dedup mark + release the lock whatever the
+   * handler does. The lock is taken BEFORE `enqueue`, so a same-key redelivery
+   * is dropped whether the first is queued, running or done — independent of
+   * which lane runs it.
+   *
+   * The handler's return value is propagated back out so card-action callback
+   * responses (e.g. a toast) can reach Feishu. A throwing handler is logged and
+   * yields `undefined` (no response).
+   */
+  private async guardAction<T>(
+    eventId: string,
+    handler: () => Promise<T>,
+    enqueue: (task: () => Promise<T | undefined>) => Promise<T | undefined>,
   ): Promise<T | undefined> {
     if (await this.seenCache.has(eventId)) {
       this.logger.debug?.(`safety: drop duplicate action ${eventId}`);
@@ -164,10 +228,6 @@ export class SafetyPipeline {
       return undefined;
     }
 
-    // The handler's return value is propagated back out so card-action
-    // callback responses (e.g. a toast) can reach Feishu. A throwing handler
-    // is logged and yields `undefined` (no response) — the dedup mark and
-    // lock release in `finally` run regardless.
     const task = async (): Promise<T | undefined> => {
       try {
         return await handler();
@@ -184,10 +244,7 @@ export class SafetyPipeline {
       }
     };
 
-    if (this.queueEnabled) {
-      return this.manager.run(queueScope, task);
-    }
-    return task();
+    return enqueue(task);
   }
 
   // ─── tier 3: dedup only (reactions) ────────────────────
@@ -217,7 +274,9 @@ export class SafetyPipeline {
   }
 
   async dispose(): Promise<void> {
-    await this.manager.dispose();
+    // Both lanes drain before the cache and lock go away: a queued or running
+    // action's `finally` still has to write its dedup mark.
+    await Promise.all([this.manager.dispose(), this.cardActionManager.dispose()]);
     this.seenCache.dispose();
     this.lock.dispose();
   }

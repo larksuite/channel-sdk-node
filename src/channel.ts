@@ -1191,7 +1191,9 @@ export class LarkChannel {
         }
       },
 
-      // Card button click — dedup + lock + queue (by chatId).
+      // Card button click — dedup + lock + queue. Which per-chat lane it joins
+      // (shared with messages, or its own) is decided by
+      // safety.chatQueue.cardActions; the default is the shared one.
       // The key includes the action's identity (tag + value) so that
       // different buttons on the same card by the same user are NOT
       // collapsed by the dedup cache. A genuine Feishu re-delivery
@@ -1204,7 +1206,7 @@ export class LarkChannel {
         // (e.g. a toast) flows back through the dispatcher to Feishu. A
         // missing handler or a deduped / in-flight drop yields `undefined`,
         // which the transport reads as "no response".
-        return this.safety.pushAction(
+        return this.safety.pushCardAction(
           `card:${evt.messageId}:${evt.operator.openId}:${actionId}`,
           evt.chatId,
           async () => {
