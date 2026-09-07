@@ -44,10 +44,12 @@ function inferCode(err: unknown, message: string): LarkChannelErrorCode {
 }
 
 /**
- * Feishu answers a reply whose target message has already been withdrawn
- * with HTTP 400 and a plain-text body ("The message was withdrawn.") that
- * carries no numeric platform code. Callers pass the lower-cased message.
- * A substring probe keeps this linear in the (server-controlled) body length.
+ * Text fallback for a reply whose target message has already been withdrawn.
+ * Feishu has been observed to answer such replies with HTTP 400 and a body
+ * whose message reads "The message was withdrawn." but without a numeric
+ * platform code; the coded variant (230011) is handled by the code table
+ * above. Callers pass the lower-cased message. A substring probe keeps this
+ * linear in the (server-controlled) body length.
  */
 function isWithdrawnReplyTarget(msg: string): boolean {
   return msg.includes('withdrawn');
