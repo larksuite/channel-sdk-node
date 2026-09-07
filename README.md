@@ -124,7 +124,7 @@ the QR URL as `source/<name>` (passed through as-is, not defaulted).
 
 `PolicyConfig`: `requireMention` · `dmMode` (`'open' \| 'allowlist' \| 'pair' \| 'disabled'`) · `dmAllowlist` · `groupAllowlist` · `respondToMentionAll` · `botLoopGuard` (see [Bot-at-bot](#bot-at-bot)). `dmAllowlist` takes **sender ids** (`ou_…` / user_id / union_id), `groupAllowlist` takes **chat ids** (`oc_…`) — an app id (`cli_…`) belongs in neither and is warned about.
 
-`SafetyConfig`: `dedup` (`ttl`/`maxEntries`/`sweepIntervalMs`) · `chatQueue` (`enabled`, `mergeWhileBusy`) · `batch.text` / `batch.media` · `staleMessageWindowMs`.
+`SafetyConfig`: `dedup` (`ttl`/`maxEntries`/`sweepIntervalMs`) · `chatQueue` (`enabled`, `mergeWhileBusy`, `cardActions`) · `batch.text` / `batch.media` · `staleMessageWindowMs`.
 
 ### Lifecycle
 
@@ -204,10 +204,31 @@ response for that click. Returning nothing (`undefined`) means "no immediate
 response" — the original behavior, so existing handlers keep working unchanged.
 
 Notes:
-- The response is sent **synchronously**, and card actions run serially per
-  chat (after any in-flight work for that chat). A slow handler can therefore
-  delay the response past Feishu's callback timeout — for heavy work, prefer
-  detaching it and reflecting progress via a card update.
+- The response is sent **synchronously**, and clicks within one chat run in
+  arrival order in every mode. A slow handler therefore delays the response
+  past Feishu's callback timeout — for heavy work, prefer detaching it and
+  reflecting progress via a card update. A `cardAction` handler must never
+  await a *later* click in the same chat: that click is queued behind it. Keep
+  multi-step confirmation in the `message` handler.
+- By default (`safety.chatQueue.cardActions: 'same'`) card actions share the
+  chat's queue with messages: a click runs after any in-flight work for that
+  chat, and messages arriving later wait for it.
+- `cardActions: 'separate'` gives card actions their own per-chat lane,
+  independent of the message queue in both directions: a click no longer waits
+  for an in-flight `message` handler, and messages do not wait for clicks. Use
+  it when a `message` handler has to wait for a card click — an agent turn
+  asking for tool approval, say; under `'same'` that is a deadlock. What the
+  application then owns:
+  1. Authenticate the operator via `evt.operator.openId` — anyone in the group
+     can click.
+  2. Application-side per-chat state shared between the `message` and
+     `cardAction` handlers is no longer serialized by the SDK; the two now run
+     concurrently.
+  3. Put a timeout on a `message` handler that waits for a click, or that
+     chat's message queue stays blocked.
+  4. Click ordering holds within one process only. Multi-instance deployments
+     still need idempotent, first-decision-wins settlement of a pending
+     approval.
 - The object is sent to Feishu as-is: do **not** include internal secrets /
   PII, and make sure it is JSON-serializable.
 

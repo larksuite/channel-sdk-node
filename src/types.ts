@@ -483,6 +483,24 @@ export interface SafetyConfig {
      * unchanged). Sunk from bridge's `pending-queue.ts`. Off by default.
      */
     mergeWhileBusy?: boolean;
+    /**
+     * Which per-chat queue `card.action.trigger` (the `cardAction` handler)
+     * joins. Only meaningful while `enabled` is on.
+     *
+     * - `'same'` (default): card actions share the chat's queue with messages.
+     *   A click runs after any in-flight work for that chat, and messages that
+     *   arrive later wait for it — the 0.6.x behavior.
+     * - `'separate'`: card actions get their own per-chat lane, independent of
+     *   the message queue in both directions: a click no longer waits for an
+     *   in-flight `message` handler, and messages do not wait for clicks.
+     *   Clicks within one chat still run in arrival order. Use it when a
+     *   `message` handler has to wait for a card click (agent tool approvals)
+     *   — under `'same'` that is a deadlock.
+     *
+     * Any other value falls back to `'same'` with a warning at construction.
+     * See the README's `cardAction` notes for what the application then owns.
+     */
+    cardActions?: 'same' | 'separate';
   };
   batch?: {
     text?: {
