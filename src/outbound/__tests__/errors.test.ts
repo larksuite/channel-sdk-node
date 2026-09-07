@@ -28,6 +28,13 @@ describe('classifyError', () => {
     expect(err.code).toBe('target_revoked');
   });
 
+  test('infers target_revoked from Feishu code 230011 (reply target withdrawn)', () => {
+    const err = classifyError({
+      response: { status: 400, data: { code: 230011, msg: 'The message was withdrawn.' } },
+    });
+    expect(err.code).toBe('target_revoked');
+  });
+
   test('infers target_revoked from a withdrawn-message response without a Feishu code', () => {
     const err = classifyError({
       response: {

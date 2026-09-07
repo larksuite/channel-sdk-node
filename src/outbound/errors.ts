@@ -22,7 +22,10 @@ function inferCode(err: unknown, message: string): LarkChannelErrorCode {
   const msg = message.toLowerCase();
 
   if (typeof feishuCode === 'number') {
-    if (feishuCode === 230020 || feishuCode === 230017) return 'target_revoked';
+    // 230011: the message targeted by a reply has already been withdrawn.
+    if (feishuCode === 230011 || feishuCode === 230017 || feishuCode === 230020) {
+      return 'target_revoked';
+    }
     if (feishuCode === 99991400 || feishuCode === 99991401) return 'permission_denied';
     if (feishuCode === 230002 || feishuCode === 230001) return 'format_error';
   }
