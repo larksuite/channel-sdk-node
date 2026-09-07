@@ -28,6 +28,66 @@ describe('classifyError', () => {
     expect(err.code).toBe('target_revoked');
   });
 
+  test('infers target_revoked from Feishu code 230011 (reply target withdrawn)', () => {
+    const err = classifyError({
+      response: { status: 400, data: { code: 230011, msg: 'The message was withdrawn.' } },
+    });
+    expect(err.code).toBe('target_revoked');
+  });
+
+  test('infers target_revoked from a withdrawn-message response without a Feishu code', () => {
+    const err = classifyError({
+      response: {
+        status: 400,
+        data: { message: 'The message was withdrawn.' },
+      },
+    });
+    expect(err.code).toBe('target_revoked');
+    expect(err.message).toBe('The message was withdrawn.');
+  });
+
+  test('does not classify an unrelated HTTP 400 as target_revoked', () => {
+    const err = classifyError({
+      response: {
+        status: 400,
+        data: { message: 'Invalid message format.' },
+      },
+    });
+    expect(err.code).toBe('format_error');
+  });
+
+  test('infers target_revoked from a withdrawn-message response carried in `msg`', () => {
+    const err = classifyError({
+      response: { status: 400, data: { msg: 'The Message Was Withdrawn.' } },
+    });
+    expect(err.code).toBe('target_revoked');
+    expect(err.message).toBe('The Message Was Withdrawn.');
+  });
+
+  test('keeps the HTTP status classification when a non-400 body mentions withdrawn', () => {
+    const err = classifyError({
+      response: { status: 403, data: { message: 'message withdrawn from scope' } },
+    });
+    expect(err.code).toBe('permission_denied');
+  });
+
+  test('tolerates a non-string response body message', () => {
+    const err = classifyError({
+      message: 'Request failed with status code 400',
+      response: { status: 400, data: { msg: 400, message: { detail: 'nested' } } },
+    });
+    expect(err.code).toBe('format_error');
+    expect(err.message).toBe('Request failed with status code 400');
+  });
+
+  test('classifies a very long unmatched HTTP 400 body quickly', () => {
+    const body = 'message '.repeat(50_000); // ~400KB, no "withdrawn"
+    const started = Date.now();
+    const err = classifyError({ response: { status: 400, data: { message: body } } });
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(err.code).toBe('format_error');
+  });
+
   test('detects ssrf_blocked from error message prefix', () => {
     const err = classifyError(new Error('ssrf_blocked: 10.0.0.1'));
     expect(err.code).toBe('ssrf_blocked');
