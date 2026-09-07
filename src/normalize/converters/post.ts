@@ -1,6 +1,6 @@
 import type { ResourceDescriptor } from '../../types';
 import type { ContentConverterFn, ConvertContext, PostElement } from '../context';
-import { applyStyle, safeParse, unwrapLocale } from '../utils';
+import { applyStyle, escapeAttr, safeParse, unwrapLocale } from '../utils';
 
 interface PostBody {
   title?: string;
@@ -8,26 +8,47 @@ interface PostBody {
   content_v2?: PostElement[][];
 }
 
+/**
+ * A validated attachment-zone entry. Unlike the raw wire record, every field
+ * here is guaranteed by `topLevelAttachments`: `fileKey` is a non-empty string,
+ * `isFolder` is a real boolean, and `fileName` is a string or absent. Rendering
+ * can then interpolate these without re-checking types.
+ */
+interface PostAttachment {
+  fileKey: string;
+  fileName?: string;
+  isFolder: boolean;
+}
+
+const placeholder = '[rich text message]';
+
 const atMentionRe = /<at(\s+)user_id(\s*)=(\s*)"(.*?)">(.*?)<\/at>/g;
 const imageKeyRe = /!\[(.*?)\]\(([^)]+)\)/g;
 
 export const convertPost: ContentConverterFn = async (raw, ctx) => {
   const rawParsed = safeParse(raw);
   if (rawParsed == null || typeof rawParsed !== 'object') {
-    return { content: '[rich text message]', resources: [] };
+    return { content: placeholder, resources: [] };
   }
 
+  // The attachment zone is a sibling of the locale documents, not part of one,
+  // so it must be read before the locale guard below — otherwise a post whose
+  // locale document is unparseable would silently drop its attachments too.
+  const attachments = topLevelAttachments(rawParsed as Record<string, unknown>);
+
   const body = unwrapLocale<PostBody>(rawParsed as Record<string, unknown>);
-  if (!body) return { content: '[rich text message]', resources: [] };
+  if (!body && attachments.length === 0) {
+    return { content: placeholder, resources: [] };
+  }
 
   // Choose source paragraphs: prefer content_v2, fallback to content.
   const sourceParagraphs =
-    body.content_v2 && body.content_v2.length > 0 ? body.content_v2 : (body.content ?? []);
+    body?.content_v2 && body.content_v2.length > 0 ? body.content_v2 : (body?.content ?? []);
 
   const resources: ResourceDescriptor[] = [];
   const lines: string[] = [];
 
-  if (body.title) {
+  if (body?.title) {
     lines.push(`**${body.title}**`);
     lines.push('');
   }
@@ -41,9 +62,50 @@ export const convertPost: ContentConverterFn = async (raw, ctx) => {
     lines.push(line);
   }
 
-  const content = lines.join('\n').trim() || '[rich text message]';
+  // Attachment zone: files render as <file .../> and are downloadable; folders
+  // render as <folder .../> tags only, mirroring the standalone converters.
+  for (const att of attachments) {
+    // Both key and name are escaped: downstream parses these tags as structured
+    // info, so a quote inside a key must not be able to forge an extra attribute.
+    const tag = att.isFolder ? 'folder' : 'file';
+    const nameAttr = att.fileName ? ` name="${escapeAttr(att.fileName)}"` : '';
+    lines.push(`<${tag} key="${escapeAttr(att.fileKey)}"${nameAttr}/>`);
+    if (!att.isFolder) {
+      resources.push({ type: 'file', fileKey: att.fileKey, fileName: att.fileName });
+    }
+  }
+
+  const content = lines.join('\n').trim() || placeholder;
   return { content, resources };
 };
+
+/**
+ * Extract and normalize the top-level attachment-zone entries of a post message.
+ *
+ * Wire values are untrusted, so every field is narrowed here rather than at the
+ * point of use: a non-string `file_name` would otherwise reach `escapeAttr` and
+ * throw, which `dispatchConvert` traps by falling back to the unknown-message
+ * converter — silently replacing the whole message with a placeholder. Likewise
+ * `is_folder` is compared against `true` rather than tested for truthiness, so
+ * that a string `"false"` cannot hide a real, downloadable file behind a
+ * `<folder/>` tag. Entries without a usable key are dropped.
+ */
+function topLevelAttachments(parsed: Record<string, unknown>): PostAttachment[] {
+  const files = parsed.files;
+  if (!Array.isArray(files)) return [];
+  const out: PostAttachment[] = [];
+  for (const f of files) {
+    if (f == null || typeof f !== 'object') continue;
+    const rec = f as Record<string, unknown>;
+    if (typeof rec.file_key !== 'string' || !rec.file_key) continue;
+    out.push({
+      fileKey: rec.file_key,
+      fileName: typeof rec.file_name === 'string' ? rec.file_name : undefined,
+      isFolder: rec.is_folder === true,
+    });
+  }
+  return out;
+}
 
 /**
  * Post-process raw markdown text from an "md" element.

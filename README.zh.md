@@ -92,7 +92,8 @@ const channel = createLarkChannel({ appId: client_id, appSecret: client_secret }
 | `respectProxyEnv` | `boolean` | `false` | 读 `HTTPS_PROXY` / `HTTP_PROXY`，WS + REST 都走代理 |
 | `httpTimeoutMs` | `number` | — | REST 调用超时 |
 | `agent` | `http(s).Agent` | — | 自定义 WS agent（优先于 `respectProxyEnv`） |
-| `handshakeTimeoutMs` | `number` | — | WS 握手超时 |
+| `handshakeTimeoutMs` | `number` | — | **单次** WS 握手尝试的超时 |
+| `connectTimeoutMs` | `number` | `15000` | `connect()` 最多等多久连上，超时即放弃（强制重连同样适用） |
 | `wsConfig` | `WSConfigOverrides` | — | WS 客户端设置（`pingTimeout`） |
 | `domain` | `Domain \| string` | `Feishu` | 飞书 / Lark 域名 |
 | `cache` | `Cache` | 内置 | 缓存实例（去重 / 凭据） |
@@ -101,9 +102,14 @@ const channel = createLarkChannel({ appId: client_id, appSecret: client_secret }
 | `source` | `string` | — | User-Agent 标记 |
 | `includeRawEvent` | `boolean` | `false` | 每个事件附带原始载荷 `evt.raw` |
 
+> **升级到 0.6.1 注意**：`handshakeTimeoutMs` 不再决定强制重连最多等多久，这件事现在
+> 由 `connectTimeoutMs`（默认 `15000`）负责。如果你此前是靠调小 `handshakeTimeoutMs`
+> 来缩短强制重连的等待，请把同样的数值显式设到 `connectTimeoutMs`，才能保持原来的行为。
+> `handshakeTimeoutMs` 仍然管**单次**握手的超时，也照旧转发给底层传输层。
+
 `PolicyConfig`：`requireMention` · `dmMode`（`'open' \| 'allowlist' \| 'pair' \| 'disabled'`）· `dmAllowlist` · `groupAllowlist` · `respondToMentionAll` · `botLoopGuard`（见 [Bot-at-bot](#bot-at-bot)）。`dmAllowlist` 填**发送方 id**（`ou_…` / user_id / union_id），`groupAllowlist` 填**群 id**（`oc_…`）——应用 id（`cli_…`）两者都不属于，填了会告警。
 
-`SafetyConfig`：`dedup`（`ttl`/`maxEntries`/`sweepIntervalMs`）· `chatQueue`（`enabled`、`mergeWhileBusy`）· `batch.text` / `batch.media` · `staleMessageWindowMs`。
+`SafetyConfig`：`dedup`（`ttl`/`maxEntries`/`sweepIntervalMs`）· `chatQueue`（`enabled`、`mergeWhileBusy`、`cardActions`）· `batch.text` / `batch.media` · `staleMessageWindowMs`。
 
 ### 生命周期
 
@@ -180,9 +186,22 @@ channel.on('cardAction', async (evt) => {
 即「无即时响应」——与旧行为一致，现有 handler 无需改动。
 
 注意：
-- 响应是**同步**回传，且卡片动作按 chat **串行**执行（排在该 chat 在途工作之后）。
-  耗时 handler 会让响应延迟、甚至超过 Feishu 回调超时——重活仍建议 detach 到后台、
-  用卡片更新反映进度。
+- 响应是**同步**回传，且无论哪种模式，同一 chat 内的点击都按到达顺序执行。耗时
+  handler 会让响应延迟、甚至超过 Feishu 回调超时——重活仍建议 detach 到后台、用卡片
+  更新反映进度。`cardAction` handler 里**不要** await 同一个 chat 的后续点击：那次点击
+  排在它自己后面。多步确认应由 `message` handler 持有。
+- 默认（`safety.chatQueue.cardActions: 'same'`）卡片动作与消息共用该 chat 的队列：点击
+  排在该 chat 在途工作之后，之后到达的消息也会等它。
+- `cardActions: 'separate'` 给卡片动作一条独立的 per-chat 队列，与消息队列双向互不
+  等待：点击不再排在在途的 `message` handler 后面，消息也不等点击。适用于 `message`
+  handler 需要等待卡片点击的场景——比如 agent 一轮里请求工具审批；在 `'same'` 下这是
+  死锁。此时应用需要自己负责：
+  1. 用 `evt.operator.openId` 核验操作者——群里任何人都能点。
+  2. `message` 与 `cardAction` 两个 handler 共享的应用侧 per-chat 状态不再由 SDK
+     串行保护，二者现在是并发的。
+  3. 给等待点击的 `message` handler 设超时，否则该 chat 的消息队列会一直被占住。
+  4. 点击顺序只在单进程内成立。多实例部署仍要对挂起的审批做幂等、首个决定生效式的
+     结算。
 - 对象会原样发给 Feishu：**勿**放内部 secret / PII，且须可被 JSON 序列化。
 
 ### 出站方法

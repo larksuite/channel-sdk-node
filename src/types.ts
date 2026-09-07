@@ -348,12 +348,34 @@ export interface LarkChannelOptions {
   wsConfig?: WSConfigOverrides;
 
   /**
-   * Maximum time (ms) to wait for the WebSocket handshake (`open` /
-   * `error`) before aborting the attempt and letting the retry loop try
-   * again. When unset, no timeout is enforced — the handshake can hang
-   * indefinitely on stuck DNS / proxy / NAT paths.
+   * Maximum time (ms) a *single* WebSocket handshake (`open` / `error`) may
+   * take before that attempt is aborted and the underlying retry loop tries
+   * again. Forwarded as-is to the underlying WSClient. When unset, no
+   * per-attempt timeout is enforced — one handshake can hang indefinitely on
+   * stuck DNS / proxy / NAT paths.
+   *
+   * This is **not** the budget for how long `connect()` waits before giving
+   * up; that is {@link connectTimeoutMs}.
    */
   handshakeTimeoutMs?: number;
+
+  /**
+   * Total time (ms) to wait for a WebSocket handshake to succeed before
+   * giving up on the attempt. Applies both to `connect()` and to the
+   * internal force-reconnect that keepalive triggers. On expiry the pending
+   * `WSClient` is torn down and the caller gets a `not_connected`
+   * `LarkChannelError` naming the elapsed budget.
+   *
+   * Defaults to 15000. `NaN`, `0`, negatives and non-finite values fall back
+   * to the default; values above the timer's 32-bit ceiling (2147483647ms) are
+   * clamped down to it. Both rules exist for the same reason: `setTimeout`
+   * turns an out-of-domain delay into 1ms, which would silently invert both an
+   * unset `Number(process.env.X)` and a deliberately generous budget.
+   *
+   * Distinct from {@link handshakeTimeoutMs}, which bounds one handshake
+   * attempt; this bounds the wait as a whole.
+   */
+  connectTimeoutMs?: number;
 
   /**
    * Optional Node http(s) agent forwarded to the underlying WSClient for
@@ -461,6 +483,24 @@ export interface SafetyConfig {
      * unchanged). Sunk from bridge's `pending-queue.ts`. Off by default.
      */
     mergeWhileBusy?: boolean;
+    /**
+     * Which per-chat queue `card.action.trigger` (the `cardAction` handler)
+     * joins. Only meaningful while `enabled` is on.
+     *
+     * - `'same'` (default): card actions share the chat's queue with messages.
+     *   A click runs after any in-flight work for that chat, and messages that
+     *   arrive later wait for it — the 0.6.x behavior.
+     * - `'separate'`: card actions get their own per-chat lane, independent of
+     *   the message queue in both directions: a click no longer waits for an
+     *   in-flight `message` handler, and messages do not wait for clicks.
+     *   Clicks within one chat still run in arrival order. Use it when a
+     *   `message` handler has to wait for a card click (agent tool approvals)
+     *   — under `'same'` that is a deadlock.
+     *
+     * Any other value falls back to `'same'` with a warning at construction.
+     * See the README's `cardAction` notes for what the application then owns.
+     */
+    cardActions?: 'same' | 'separate';
   };
   batch?: {
     text?: {
