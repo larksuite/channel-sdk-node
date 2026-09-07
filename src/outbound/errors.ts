@@ -10,16 +10,16 @@ export function classifyError(
 ): LarkChannelError {
   if (err instanceof LarkChannelError) return err;
 
-  const code = inferCode(err);
   const message = extractMessage(err);
+  const code = inferCode(err, message);
   return new LarkChannelError(code, message, { cause: err, context });
 }
 
-function inferCode(err: unknown): LarkChannelErrorCode {
+function inferCode(err: unknown, message: string): LarkChannelErrorCode {
   const raw = err as any;
   const status = raw?.response?.status ?? raw?.status;
   const feishuCode = raw?.response?.data?.code ?? raw?.data?.code ?? raw?.code;
-  const msg = extractMessage(err).toLowerCase();
+  const msg = message.toLowerCase();
 
   if (typeof feishuCode === 'number') {
     if (feishuCode === 230020 || feishuCode === 230017) return 'target_revoked';
@@ -27,14 +27,9 @@ function inferCode(err: unknown): LarkChannelErrorCode {
     if (feishuCode === 230002 || feishuCode === 230001) return 'format_error';
   }
 
-  // Feishu can return HTTP 400 without a numeric platform code when the
-  // message targeted by a reply has already been withdrawn. Classify the
-  // platform message before the generic HTTP 400 fallback.
-  if (/\bmessage\b.*\b(withdrawn|recalled)\b/.test(msg)) return 'target_revoked';
-
   if (status === 429) return 'rate_limited';
   if (status === 401 || status === 403) return 'permission_denied';
-  if (status === 400) return 'format_error';
+  if (status === 400) return isWithdrawnReplyTarget(msg) ? 'target_revoked' : 'format_error';
   if (status === 404) return 'target_revoked';
 
   if (msg.startsWith('ssrf_blocked')) return 'ssrf_blocked';
@@ -45,9 +40,21 @@ function inferCode(err: unknown): LarkChannelErrorCode {
   return 'unknown';
 }
 
+/**
+ * Feishu answers a reply whose target message has already been withdrawn
+ * with HTTP 400 and a plain-text body ("The message was withdrawn.") that
+ * carries no numeric platform code. Callers pass the lower-cased message.
+ * A substring probe keeps this linear in the (server-controlled) body length.
+ */
+function isWithdrawnReplyTarget(msg: string): boolean {
+  return msg.includes('withdrawn');
+}
+
 function extractMessage(err: unknown): string {
   const raw = err as any;
-  return raw?.response?.data?.msg || raw?.response?.data?.message || raw?.message || String(err);
+  const candidates = [raw?.response?.data?.msg, raw?.response?.data?.message, raw?.message];
+  const found = candidates.find((c) => typeof c === 'string' && c.length > 0);
+  return found ?? String(err);
 }
 
 export function isRetryable(err: LarkChannelError): boolean {

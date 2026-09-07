@@ -64,6 +64,23 @@ describe('sendText fallback', () => {
     expect(create.mock.calls[0][0].data.msg_type).toBe('text');
   });
 
+  test('reply rejected with a code-less "withdrawn" HTTP 400 → retry as a fresh create', async () => {
+    // Feishu returns this shape (no numeric platform code) when the reply
+    // target was withdrawn while the handler was still running.
+    const withdrawn: any = new Error('Request failed with status code 400');
+    withdrawn.response = { status: 400, data: { message: 'The message was withdrawn.' } };
+    const reply = vi.fn().mockRejectedValueOnce(withdrawn);
+    const create = vi.fn().mockResolvedValueOnce(okResponse('om_new'));
+    const sender = new OutboundSender(makeClient({ reply, create }), fastConfig, logger);
+
+    const r = await sender.send('oc_abc', { text: 'hi' }, { replyTo: 'om_gone' });
+
+    expect(r.messageId).toBe('om_new');
+    expect(reply).toHaveBeenCalledTimes(1);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0][0].data.msg_type).toBe('text');
+  });
+
   test('successful reply does NOT fall back', async () => {
     const reply = vi.fn().mockResolvedValueOnce(okResponse('om_replied'));
     const create = vi.fn();
