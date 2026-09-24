@@ -459,6 +459,25 @@ export class OutboundSender {
   }
 
   /**
+   * Flip a card's `streaming_mode` via cardkit.v1.card.settings without
+   * touching the summary. Feishu closes streaming mode 10 minutes after it
+   * was last switched on; setting it to `true` while it is already on does
+   * not restart that clock, but `false` followed by `true` does — even on a
+   * card whose stream Feishu has already closed. `sequence` counts against
+   * the same per-card counter as every other cardkit call.
+   */
+  async setStreamingMode(cardId: string, sequence: number, on: boolean): Promise<void> {
+    await this.client.cardkit.v1.card.settings({
+      path: { card_id: cardId },
+      data: {
+        settings: JSON.stringify({ config: { streaming_mode: on } }),
+        sequence,
+        uuid: `s_${cardId}_${sequence}`,
+      } as never,
+    });
+  }
+
+  /**
    * Switch a streaming card to finalized state (streaming_mode: false).
    * Feishu auto-closes after 10min regardless, but callers should close
    * explicitly when producer completes.

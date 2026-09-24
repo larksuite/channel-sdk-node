@@ -22,6 +22,13 @@ const DEFAULT_MAX_ELEMENT_CHARS = 30000;
 const ELEMENT_ID = 'stream_md';
 
 /**
+ * Feishu closes a card's streaming mode 10 minutes after it was last switched
+ * on (open-platform doc: 「流式更新模式将在距上次开启 10 分钟后自动关闭」), and
+ * cardElement.content is rejected once it is closed. Re-open before that.
+ */
+const STREAM_REOPEN_MS = 8 * 60_000;
+
+/**
  * Shorten a markdown content string into a single-line preview suitable for
  * the card's `summary.content` — shown in chat lists / message previews.
  */
@@ -86,6 +93,20 @@ function buildStreamingCard(initialText: string): object {
  * continue with the tail. Multiple rollovers within one stream are
  * supported. The head card's messageId is what `messageId` / `run()`
  * return; follow-up cards are tracked internally.
+ *
+ * Keepalive: Feishu closes streaming mode 10 minutes after it was last
+ * switched on, so a reply that takes longer used to freeze at the 10-minute
+ * snapshot and lose everything after it, final text included. Measured
+ * against the live API (2026-09): setting `streaming_mode: true` on a card
+ * that is already streaming does not restart the clock; `false` then `true`
+ * does, and still works after Feishu has already closed the stream. So on
+ * the first push more than STREAM_REOPEN_MS after the card was (re)opened,
+ * the controller toggles streaming off and on and then pushes — same card,
+ * cursor uninterrupted. If a push is rejected anyway (stream closed for
+ * another reason, toggle refused during an interaction callback, …) the
+ * controller switches the card to full-card entity updates, which need no
+ * streaming mode, so the remaining content and the final text still land;
+ * only if that fails too does it give up.
  */
 export class MarkdownStreamControllerImpl implements MarkdownStreamControllerPublic {
   /** Content of the current (latest) card's markdown element. */
@@ -103,6 +124,14 @@ export class MarkdownStreamControllerImpl implements MarkdownStreamControllerPub
    * still runs on a best-effort basis.
    */
   private streamingFailed = false;
+  /** When the current card's streaming mode was last switched on. */
+  private streamOpenedAt = 0;
+  /**
+   * Set once a streaming push was rejected: the current card is then kept
+   * current with full-card updates (cardkit.v1.card.update) instead of the
+   * streaming text API. Cleared when a rollover starts a fresh card.
+   */
+  private fullUpdate = false;
   /** messageIds of every rollover card created after the head. */
   private rolloverMessageIds: string[] = [];
 
@@ -177,6 +206,7 @@ export class MarkdownStreamControllerImpl implements MarkdownStreamControllerPub
       this.cardId,
       this.opts,
     );
+    this.streamOpenedAt = Date.now();
   }
 
   private async pushContent(): Promise<void> {
@@ -187,8 +217,17 @@ export class MarkdownStreamControllerImpl implements MarkdownStreamControllerPub
       try {
         await this.pushSnapshot();
       } catch (e) {
-        this.streamingFailed = true;
-        this.sender.logger.warn?.('[stream] update failed', e);
+        // The streaming text API refused (stream closed, toggle rejected,
+        // …). Keep the card current with full-card updates instead; the
+        // typewriter stops but nothing is lost.
+        this.sender.logger.warn?.('[stream] update failed, switching to full-card updates', e);
+        this.fullUpdate = true;
+        try {
+          await this.pushSnapshot();
+        } catch (e2) {
+          this.streamingFailed = true;
+          this.sender.logger.warn?.('[stream] full-card update failed', e2);
+        }
       }
     });
   }
@@ -202,8 +241,28 @@ export class MarkdownStreamControllerImpl implements MarkdownStreamControllerPub
     while (this.content.length > this.maxChars) {
       await this.rollover();
     }
-    const snapshot = this.content || '...';
-    await this.sender.updateCardElementContent(this.cardId, ELEMENT_ID, snapshot, ++this.sequence);
+    await this.pushText(this.content || '...');
+  }
+
+  /**
+   * Write `text` to the current card: streaming text update by default,
+   * preceded by an off/on toggle of streaming mode when the card's 10-minute
+   * streaming window is about to run out; a full-card update once the
+   * streaming path has failed for this card.
+   */
+  private async pushText(text: string): Promise<void> {
+    if (this.fullUpdate) {
+      const card = buildStreamingCard(text) as { config: Record<string, unknown> };
+      card.config.streaming_mode = false;
+      await this.sender.updateCardFull(this.cardId, card, ++this.sequence);
+      return;
+    }
+    if (Date.now() - this.streamOpenedAt > STREAM_REOPEN_MS) {
+      await this.sender.setStreamingMode(this.cardId, ++this.sequence, false);
+      await this.sender.setStreamingMode(this.cardId, ++this.sequence, true);
+      this.streamOpenedAt = Date.now();
+    }
+    await this.sender.updateCardElementContent(this.cardId, ELEMENT_ID, text, ++this.sequence);
   }
 
   /**
@@ -223,7 +282,7 @@ export class MarkdownStreamControllerImpl implements MarkdownStreamControllerPub
     const tail = chunks.slice(1).join('\n');
 
     // 1. Pin the old card's element to the head content.
-    await this.sender.updateCardElementContent(this.cardId, ELEMENT_ID, head, ++this.sequence);
+    await this.pushText(head);
 
     // 2. Disable streaming on the old card. Best-effort — Feishu auto-
     //    closes after 10min, so a transient failure here is recoverable.
@@ -246,10 +305,13 @@ export class MarkdownStreamControllerImpl implements MarkdownStreamControllerPub
     );
 
     // 4. Switch state to the new card. Sequence is per-element, restart
-    //    from 0 for the fresh element.
+    //    from 0 for the fresh element; the fresh card streams again with a
+    //    fresh 10-minute window.
     this.cardId = newCardId;
     this.content = tail;
     this.sequence = 0;
+    this.streamOpenedAt = Date.now();
+    this.fullUpdate = false;
     this.rolloverMessageIds.push(newMessageId);
   }
 
@@ -264,12 +326,7 @@ export class MarkdownStreamControllerImpl implements MarkdownStreamControllerPub
     if (!this.content && !this.streamingFailed) {
       await this.queue.enqueue(async () => {
         try {
-          await this.sender.updateCardElementContent(
-            this.cardId,
-            ELEMENT_ID,
-            DEFAULT_EMPTY,
-            ++this.sequence,
-          );
+          await this.pushText(DEFAULT_EMPTY);
         } catch {
           // best effort
         }
