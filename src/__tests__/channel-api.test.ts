@@ -287,15 +287,13 @@ describe('editMessage routes to im.v1.message.update', () => {
   });
 });
 
-describe('card.action dedup key includes button identity', () => {
-  // Regression: previously the dedup key was
-  //   card:${messageId}:${operatorId}
-  // so the second click on ANY button of the same card by the same user
-  // got silently dropped. The fix folds action.tag + action.value into
-  // the key so distinct buttons never collide.
+describe('card.action 按平台投递标识去重', () => {
+  // 不同按钮点击代表不同投递；相同 fixture 的再次投递代表平台重放。
+  // 真实重复点击使用不同 token，由独立的重试回归用例覆盖。
 
   function buildRawCardAction(value: unknown, messageId = 'om_card1'): unknown {
     return {
+      token: `${messageId}:${JSON.stringify(value)}`,
       schema: '2.0',
       event_type: 'card.action.trigger',
       context: {
@@ -328,7 +326,7 @@ describe('card.action dedup key includes button identity', () => {
     expect(fired).toEqual([{ cmd: 'A' }, { cmd: 'B' }]);
   });
 
-  test('same button clicked twice (e.g. Feishu re-delivery) only fires once', async () => {
+  test('同一平台投递的重放只调用一次 handler', async () => {
     const ch = createChannel();
     (ch as any).registerDispatcherHandlers();
 
@@ -356,6 +354,7 @@ describe('cardAction handler return value flows back out of the dispatcher', () 
 
   function buildRawCardAction(value: unknown, messageId: string): unknown {
     return {
+      token: `${messageId}:${JSON.stringify(value)}`,
       schema: '2.0',
       event_type: 'card.action.trigger',
       context: {

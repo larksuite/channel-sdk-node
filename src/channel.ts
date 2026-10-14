@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import { stat, writeFile } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
@@ -1194,26 +1195,27 @@ export class LarkChannel {
       // Card button click — dedup + lock + queue. Which per-chat lane it joins
       // (shared with messages, or its own) is decided by
       // safety.chatQueue.cardActions; the default is the shared one.
-      // The key includes the action's identity (tag + value) so that
-      // different buttons on the same card by the same user are NOT
-      // collapsed by the dedup cache. A genuine Feishu re-delivery
-      // of the same click still hashes to the same key.
+      // 按平台投递标识过滤重放，允许用户重新点击同一按钮。
       'card.action.trigger': async (raw: unknown) => {
         const evt = normalizeCardAction(raw as never, { includeRaw });
         if (!evt) return undefined;
-        const actionId = cardActionId(evt.action);
+        const delivery = raw as {
+          event_id?: unknown;
+          header?: { event_id?: unknown };
+          token?: unknown;
+        };
+        const eventId = delivery.event_id ?? delivery.header?.event_id ?? delivery.token;
+        // 标识缺失时使用独立键，保留队列而不屏蔽真实重试。
+        const deliveryId =
+          typeof eventId === 'string' && eventId.length > 0 ? eventId : randomUUID();
         // Return the handler's value so a card-action callback response
         // (e.g. a toast) flows back through the dispatcher to Feishu. A
         // missing handler or a deduped / in-flight drop yields `undefined`,
         // which the transport reads as "no response".
-        return this.safety.pushCardAction(
-          `card:${evt.messageId}:${evt.operator.openId}:${actionId}`,
-          evt.chatId,
-          async () => {
-            const h = this.handlers.cardAction;
-            return h ? h(evt) : undefined;
-          },
-        );
+        return this.safety.pushCardAction(`card:${deliveryId}`, evt.chatId, async () => {
+          const h = this.handlers.cardAction;
+          return h ? h(evt) : undefined;
+        });
       },
 
       // Reactions — dedup only
@@ -1500,24 +1502,4 @@ function reactionKey(evt: {
   actionTime?: number;
 }): string {
   return `rx:${evt.messageId}:${evt.operator.openId}:${evt.emojiType}:${evt.action}:${evt.actionTime ?? 0}`;
-}
-
-/**
- * Build a stable identity for a card action event's button/element, so that
- * different clicks on the same card by the same user dedup independently.
- * `tag` plus serialized `value` is enough to tell buttons apart; `name` and
- * `option` are rolled in for form-style interactions where the same value
- * may repeat but the triggering element differs. The serialized payload is
- * length-clamped to keep cache keys small.
- */
-function cardActionId(action: {
-  value: unknown;
-  tag: string;
-  name?: string;
-  option?: string;
-}): string {
-  const serialized =
-    typeof action.value === 'string' ? action.value : JSON.stringify(action.value ?? '');
-  const valuePart = serialized.length > 128 ? serialized.slice(0, 128) : serialized;
-  return `${action.tag}|${action.name ?? ''}|${action.option ?? ''}|${valuePart}`;
 }
