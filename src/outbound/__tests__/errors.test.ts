@@ -13,6 +13,26 @@ describe('classifyError', () => {
     expect(err.code).toBe('rate_limited');
   });
 
+  test('infers rate_limited from Feishu code 99991400 on HTTP 429', () => {
+    const err = classifyError({
+      response: { status: 429, data: { code: 99991400, msg: 'request trigger frequency limit' } },
+    });
+    expect(err.code).toBe('rate_limited');
+    expect(isRetryable(err)).toBe(true);
+  });
+
+  test('infers rate_limited from Feishu code 99991400 on a legacy HTTP 400', () => {
+    const err = classifyError({
+      response: { status: 400, data: { code: 99991400, msg: 'request trigger frequency limit' } },
+    });
+    expect(err.code).toBe('rate_limited');
+  });
+
+  test('keeps Feishu code 99991401 (IP not allowlisted) as permission_denied', () => {
+    const err = classifyError({ response: { status: 400, data: { code: 99991401 } } });
+    expect(err.code).toBe('permission_denied');
+  });
+
   test('infers permission_denied from HTTP 403', () => {
     const err = classifyError({ response: { status: 403 } });
     expect(err.code).toBe('permission_denied');

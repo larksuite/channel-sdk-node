@@ -74,7 +74,7 @@ describe('a probe that cannot answer keeps the session', () => {
   test('401 / 403 does not end the session', async () => {
     for (const status of [401, 403]) {
       const { ch, stubs, ended } = await joinProbedMeeting();
-      stubs.events.mockRejectedValue(axiosErrorWithToken({ status, feishuCode: 99991400 }));
+      stubs.events.mockRejectedValue(axiosErrorWithToken({ status, feishuCode: 99991672 }));
 
       await vi.advanceTimersByTimeAsync(PROBE_INTERVAL * 5);
 
@@ -247,7 +247,7 @@ describe('LivenessProbe verdicts', () => {
   test('a permission error is "unknown" — a missing scope is not a departure', async () => {
     const { ch } = createTestChannel();
     const stubs = stubMeetingApis(ch);
-    stubs.events.mockRejectedValue(axiosErrorWithToken({ status: 403, feishuCode: 99991400 }));
+    stubs.events.mockRejectedValue(axiosErrorWithToken({ status: 403, feishuCode: 99991672 }));
 
     await expect(makeProbe(ch).check()).resolves.toBe('unknown');
   });

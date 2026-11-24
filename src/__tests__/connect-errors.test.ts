@@ -39,7 +39,7 @@ describe('fetchBotIdentity error classification', () => {
   test('HTTP 403 → permission_denied', async () => {
     const ch = createChannel();
     (ch.rawClient as any).request = vi.fn().mockRejectedValue({
-      response: { status: 403, data: { code: 99991400, msg: 'forbidden' } },
+      response: { status: 403, data: { code: 99991672, msg: 'forbidden' } },
     });
     await expect(fetchBotIdentity(ch)).rejects.toMatchObject({
       code: 'permission_denied',

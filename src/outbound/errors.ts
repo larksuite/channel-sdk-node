@@ -26,7 +26,11 @@ function inferCode(err: unknown, message: string): LarkChannelErrorCode {
     if (feishuCode === 230011 || feishuCode === 230017 || feishuCode === 230020) {
       return 'target_revoked';
     }
-    if (feishuCode === 99991400 || feishuCode === 99991401) return 'permission_denied';
+    // 99991400 is Feishu's rate-limit code ("request trigger frequency limit"). It arrives
+    // as HTTP 429, or as HTTP 400 on legacy OpenAPIs, so it must be decided here rather
+    // than by the status table below.
+    if (feishuCode === 99991400) return 'rate_limited';
+    if (feishuCode === 99991401) return 'permission_denied';
     if (feishuCode === 230002 || feishuCode === 230001) return 'format_error';
   }
 

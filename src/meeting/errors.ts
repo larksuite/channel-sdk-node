@@ -44,7 +44,14 @@ const RETRYABLE_STATUS = new Set([...INCONCLUSIVE_STATUS, 429, 500, 503]);
  * `format_error` and has no signal to refresh the token, which is the single most
  * common failure this path has.
  */
-const PERMISSION_CODES = new Set([99991400, 99991401, 99991663, 99991668, 99991672, 20017]);
+const PERMISSION_CODES = new Set([99991401, 99991663, 99991668, 99991672, 20017]);
+
+/**
+ * Feishu's rate-limit code ("request trigger frequency limit"). It arrives as HTTP 429,
+ * or as HTTP 400 on legacy OpenAPIs, so the status alone cannot be trusted to mark it
+ * retryable.
+ */
+const RATE_LIMIT_CODE = 99991400;
 
 interface RawFailure {
   status?: number;
@@ -102,6 +109,7 @@ export function classifyMeetingError(err: unknown): LarkChannelErrorCode {
   const { status, feishuCode } = summarizeApiFailure(err);
   const code = (err as { code?: unknown } | undefined)?.code;
 
+  if (feishuCode === RATE_LIMIT_CODE) return 'rate_limited';
   if (feishuCode !== undefined && PERMISSION_CODES.has(feishuCode)) return 'permission_denied';
   if (status === 401 || status === 403) return 'permission_denied';
   if (status === 429) return 'rate_limited';
@@ -132,6 +140,8 @@ export function meetingError(err: unknown, context?: MeetingErrorContext): LarkC
 /** Whether retrying stands a chance, or the credential/request needs fixing first. */
 export function isRetryableMeetingError(err: LarkChannelError): boolean {
   if (err.code === 'permission_denied' || err.code === 'format_error') return false;
+  // A rate limit always clears with time, whatever status carried it (see RATE_LIMIT_CODE).
+  if (err.code === 'rate_limited') return true;
   const status = (err.cause as ApiFailure | undefined)?.status;
   if (status !== undefined) return RETRYABLE_STATUS.has(status);
   // No HTTP status at all means the request never landed — a socket reset or a
