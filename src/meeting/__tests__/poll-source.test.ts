@@ -259,7 +259,7 @@ describe('termination is a full teardown, not just a stopped loop', () => {
     const stubs = stubMeetingApis(ch);
     stubs.events
       .mockResolvedValueOnce(EMPTY_PAGE)
-      .mockRejectedValue(axiosErrorWithToken({ status: 403, feishuCode: 99991400 }));
+      .mockRejectedValue(axiosErrorWithToken({ status: 403, feishuCode: 99991672 }));
 
     const session = await ch.followMyMeeting({ userAccessToken: USER_TOKEN });
     expect(activeMeetingIds(ch)).toContain(MEETING_ID);
