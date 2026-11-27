@@ -159,7 +159,12 @@ function renderElement(
       const userId = el.user_id ?? '';
       if (userId === 'all' || userId === 'all_members') return '@all';
       // Prefer placeholder key so resolveMentions handles it uniformly
-      const info = ctx.mentionsByOpenId.get(userId);
+      // Feishu puts the placeholder key itself (e.g. "@_user_1") in the at
+      // element's `user_id` for many post payloads, while the event
+      // `mentions` array carries the open_id. Look the mention up by key
+      // first, then fall back to the open_id index, so a bot mention keeps
+      // flowing through resolveMentions and gets stripped correctly.
+      const info = ctx.mentions.get(userId) ?? ctx.mentionsByOpenId.get(userId);
       if (info) return info.key;
       return el.user_name ? `@${el.user_name}` : `@${userId}`;
     }

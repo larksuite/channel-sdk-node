@@ -156,6 +156,30 @@ describe('post converter', () => {
     expect(r.content).toContain('@_user_1');
   });
 
+  test('at element uses placeholder key when user_id carries the mention key itself', async () => {
+    // Real Feishu post payloads put the placeholder key (e.g. "@_user_1") in
+    // the at element's `user_id` field instead of an open_id, while the event
+    // `mentions` array carries the open_id separately. The converter must
+    // resolve by key first so resolveMentions can strip a bot mention.
+    const ctxWithMention: ConvertContext = {
+      ...ctx,
+      mentions: new Map([
+        ['@_user_1', { key: '@_user_1', openId: 'ou_bot', name: 'TestBot', isBot: true }],
+      ]),
+      mentionsByOpenId: new Map([
+        ['ou_bot', { key: '@_user_1', openId: 'ou_bot', name: 'TestBot', isBot: true }],
+      ]),
+    };
+    const raw = JSON.stringify({
+      zh_cn: {
+        content: [[{ tag: 'at', user_id: '@_user_1', user_name: 'TestBot' }]],
+      },
+    });
+    const r = await convertPost(raw, ctxWithMention);
+    expect(r.content).toContain('@_user_1');
+    expect(r.content).not.toContain('@TestBot');
+  });
+
   test('link tag renders as Markdown link', async () => {
     const raw = JSON.stringify({
       zh_cn: {

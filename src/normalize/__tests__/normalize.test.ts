@@ -73,6 +73,34 @@ describe('normalize() end-to-end', () => {
     expect(msg.content).toBe('help me');
   });
 
+  test('bot mention in a post message is stripped when at user_id carries the key', async () => {
+    // Feishu sends the first message of a new topic-group thread as a rich
+    // `post`, whose at element puts the placeholder key in `user_id`. The bot
+    // mention must still be stripped so slash commands keep working.
+    const event = buildEvent({
+      message_type: 'post',
+      content: JSON.stringify({
+        title: '',
+        content: [
+          [
+            { tag: 'at', user_id: '@_bot', user_name: 'TestBot' },
+            { tag: 'text', text: ' /cd' },
+          ],
+        ],
+      }),
+      mentions: [
+        {
+          key: '@_bot',
+          id: { open_id: 'ou_bot' },
+          name: 'TestBot',
+        },
+      ],
+    });
+    const msg = await normalize(event, { botIdentity });
+    expect(msg.mentionedBot).toBe(true);
+    expect(msg.content).toBe('/cd');
+  });
+
   test('@all detection from mentions array', async () => {
     const event = buildEvent({
       content: '{"text":"@_all listen up"}',
